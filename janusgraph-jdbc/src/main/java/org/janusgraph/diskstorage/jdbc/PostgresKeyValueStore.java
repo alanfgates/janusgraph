@@ -13,19 +13,19 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-public class MysqlKeyValueStore extends JdbcKeyValueStore {
+public class PostgresKeyValueStore extends JdbcKeyValueStore {
 
-    public MysqlKeyValueStore(String name, JdbcStoreManager mgr) {
+    public PostgresKeyValueStore(String name, JdbcStoreManager mgr) {
         super(name, mgr);
     }
 
     @Override
     protected String getKeyType() {
-        return "varbinary(256)";
+        return "bytea";
     }
 
     @Override
     protected String getValueType() {
-        return "varbinary(2048)";
+        return "bytea";
     }
 }

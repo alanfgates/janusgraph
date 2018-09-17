@@ -18,12 +18,16 @@ import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
 import org.janusgraph.diskstorage.PermanentBackendException;
 import org.janusgraph.diskstorage.common.AbstractStoreTransaction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.concurrent.ConcurrentMap;
 
 public class JdbcStoreTx extends AbstractStoreTransaction {
+
+    private static final Logger log = LoggerFactory.getLogger(JdbcStoreTx.class);
 
     private final Connection jdbcConn;
     // Don't mess with this, other than add ourselves on creation and remove ourselves on commit
@@ -43,6 +47,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction {
     @Override
     public void commit() throws BackendException {
         try {
+            log.debug("Committing");
             jdbcConn.commit();
             jdbcConn.close();
         } catch (SQLException e) {
@@ -55,6 +60,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction {
     @Override
     public void rollback() throws BackendException {
         try {
+            log.debug("Aborting");
             jdbcConn.rollback();
             jdbcConn.close();
         } catch (SQLException e) {

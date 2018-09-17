@@ -14,6 +14,7 @@
 package org.janusgraph.diskstorage.jdbc;
 
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -35,6 +36,8 @@ import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.KeyValueEntry;
 import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStore;
 import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStoreManager;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -52,6 +55,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class JdbcStoreManager extends AbstractStoreManager implements OrderedKeyValueStoreManager {
+
+    private static final Logger log = LoggerFactory.getLogger(JdbcStoreManager.class);
 
     public static final ConfigNamespace JDBC_NS =
         new ConfigNamespace(GraphDatabaseConfiguration.STORAGE_NS, "jdbc", "SQL JDBC backend " +
@@ -86,7 +91,6 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
         "(" + STORES_NAME + " varchar(128) primary key)";
 
     private final DataSource connPool;
-    private final ConcurrentMap<String, JdbcKeyValueStore> stores;
     // List of our transactions, so we know what to shutdown at close.  Kept in a
     // ConcurrentHashMap only for hte synchronization.
     private final ConcurrentMap<Integer, JdbcStoreTx> txs;
@@ -95,42 +99,58 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
     private final StoreFeatures features;
 
+    final ConcurrentMap<String, JdbcKeyValueStore> stores;
+
     public JdbcStoreManager(Configuration conf) throws BackendException {
+        this(conf, null);
+    }
+
+    // This is for testing so that the tests can pass in an embedded Postgres source.
+    @VisibleForTesting
+    JdbcStoreManager(Configuration conf, DataSource dataSource) throws BackendException {
         super(conf);
 
-        Preconditions.checkArgument(conf.has(JDBC_URL) && conf.has(JDBC_USER) &&
-                conf.has(JDBC_PASSWORD),
-            "Please supply configuration parameters " + JDBC_URL + ", " + JDBC_USER
-            + ", " + JDBC_PASSWORD);
+        if (dataSource == null) {
+            // If the caller has not passed in a dataSource, then create a connection pool.
+            Preconditions.checkArgument(conf.has(JDBC_URL) && conf.has(JDBC_USER) &&
+                    conf.has(JDBC_PASSWORD),
+                "Please supply configuration parameters " + JDBC_URL + ", " + JDBC_USER
+                    + ", " + JDBC_PASSWORD);
 
-        String driverUrl = conf.get(JDBC_URL);
-        String user = conf.get(JDBC_USER);
-        String passwd = conf.get(JDBC_PASSWORD);
-        int maxPoolSize = conf.get(JDBC_POOL_SIZE);
+            String driverUrl = conf.get(JDBC_URL);
+            String user = conf.get(JDBC_USER);
+            String passwd = conf.get(JDBC_PASSWORD);
+            int maxPoolSize = conf.get(JDBC_POOL_SIZE);
 
-        // Not sure if I need something like this.
-        //Properties properties = replacePrefix(
+            // Not sure if I need something like this.
+            //Properties properties = replacePrefix(
             //DataSourceProvider.getPrefixedProperties(hdpConfig, HIKARI));
-        Duration connectionTimeout = conf.get(JDBC_TIMEOUT);
-        HikariConfig config = null;
-        try {
-            config = new HikariConfig();
-        } catch (Exception e) {
-            throw new PermanentBackendException("Cannot create HikariCP configuration: ", e);
+            Duration connectionTimeout = conf.get(JDBC_TIMEOUT);
+            HikariConfig config = null;
+            try {
+                config = new HikariConfig();
+            } catch (Exception e) {
+                throw new PermanentBackendException("Cannot create HikariCP configuration: ", e);
+            }
+            config.setMaximumPoolSize(maxPoolSize);
+            config.setJdbcUrl(driverUrl);
+            config.setUsername(user);
+            config.setPassword(passwd);
+            //https://github.com/brettwooldridge/HikariCP
+            config.setConnectionTimeout(connectionTimeout.toMillis());
+            log.info("Setting up connection pool with JDBC address " + driverUrl + " and user " +
+                    user);
+            connPool = new HikariDataSource(config);
+        } else {
+            log.debug("DataSource passed in, skipping setup of connection pool.");
+            connPool = dataSource;
         }
-        config.setMaximumPoolSize(maxPoolSize);
-        config.setJdbcUrl(driverUrl);
-        config.setUsername(user);
-        config.setPassword(passwd);
-        //https://github.com/brettwooldridge/HikariCP
-        config.setConnectionTimeout(connectionTimeout.toMillis());
-        connPool = new HikariDataSource(config);
 
         stores = new ConcurrentHashMap<>();
         txs = new ConcurrentHashMap<>();
         nextTxId = new AtomicInteger(0);
         try (Connection conn = getJdbcConn()) {
-            createSysTableIfNotExit(conn);
+            createSysTableIfNotExist(conn);
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to close JDBC connection", e);
         }
@@ -179,7 +199,9 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
         for (String store : allStores) {
             try (Connection conn = getJdbcConn()) {
                 try (Statement stmt = conn.createStatement()) {
-                    stmt.execute("delete from " + STORES_TABLE);
+                    String sql = "delete from " + STORES_TABLE;
+                    log.debug("Going to run " + sql);
+                    stmt.execute(sql);
                 }
             } catch (SQLException e) {
                 throw new TemporaryBackendException("Unable to connect to database or drop tables", e);
@@ -215,7 +237,8 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     public OrderedKeyValueStore openDatabase(String name) throws BackendException {
         Preconditions.checkState(!closed);
         Preconditions.checkNotNull(name);
-        return stores.computeIfAbsent(name, s -> new MysqlKeyValueStore(s, JdbcStoreManager.this));
+        return stores.computeIfAbsent(name.toLowerCase(),
+            s -> new PostgresKeyValueStore(s, JdbcStoreManager.this));
     }
 
     @Override
@@ -225,24 +248,14 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
             OrderedKeyValueStore store = openDatabase(mutation.getKey());
             KVMutation mutationValue = mutation.getValue();
 
-            /*
-            if (!mutationValue.hasAdditions() && !mutationValue.hasDeletions()) {
-                log.debug("Empty mutation set for {}, doing nothing", mutation.getKey());
-            } else {
-                log.debug("Mutating {}", mutation.getKey());
-            }
-            */
-
             if (mutationValue.hasAdditions()) {
                 for (KeyValueEntry entry : mutationValue.getAdditions()) {
                     store.insert(entry.getKey(),entry.getValue(),txh);
-                    //log.trace("Insertion on {}: {}", mutation.getKey(), entry);
                 }
             }
             if (mutationValue.hasDeletions()) {
                 for (StaticBuffer del : mutationValue.getDeletions()) {
                     store.delete(del,txh);
-                    //log.trace("Deletion on {}: {}", mutation.getKey(), del);
                 }
             }
         }
@@ -270,7 +283,9 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
         try (Connection conn = getJdbcConn()) {
             try (Statement stmt = conn.createStatement()) {
-                ResultSet rs = stmt.executeQuery("select " + STORES_NAME + " from " + STORES_TABLE);
+                String sql = "select " + STORES_NAME + " from " + STORES_TABLE;
+                log.debug("Going to run query " + sql);
+                ResultSet rs = stmt.executeQuery(sql);
                 while (rs.next()) {
                     allStores.add(rs.getString(STORES_NAME));
                 }
@@ -284,12 +299,15 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
         return allStores;
     }
 
-    private void createSysTableIfNotExit(Connection conn) throws SQLException {
+    private void createSysTableIfNotExist(Connection conn) throws SQLException {
         DatabaseMetaData md = conn.getMetaData();
         ResultSet rs = md.getTables(null, null, STORES_TABLE, null);
         if (!rs.next()) {
             try (Statement stmt = conn.createStatement()) {
-                stmt.execute("create table " + STORES_TABLE + STORES_SCHEMA);
+                String sql = "create table " + STORES_TABLE + " " + STORES_SCHEMA;
+                log.debug("Going to execute " + sql);
+                stmt.execute(sql);
+                log.debug("Committing");
                 conn.commit();
             }
         }
