@@ -34,6 +34,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction {
     // or rollback.
     private final ConcurrentMap<Integer, JdbcStoreTx> txs;
     private final int txId;
+    private boolean closed;
 
     public JdbcStoreTx(BaseTransactionConfig config, Connection jdbcConn,
                        ConcurrentMap<Integer, JdbcStoreTx> txs, int txId) {
@@ -42,35 +43,42 @@ public class JdbcStoreTx extends AbstractStoreTransaction {
         this.txs = txs;
         this.txId = txId;
         txs.put(txId, this);
+        closed = false;
     }
 
     @Override
     public void commit() throws BackendException {
-        try {
-            log.debug("Committing");
-            jdbcConn.commit();
-            jdbcConn.close();
-        } catch (SQLException e) {
-            throw new PermanentBackendException("Commit failed", e);
-        } finally {
-            txs.remove(txId);
+        if (!closed) {
+            try {
+                log.debug("Committing");
+                jdbcConn.commit();
+                jdbcConn.close();
+            } catch (SQLException e) {
+                throw new PermanentBackendException("Commit failed", e);
+            } finally {
+                txs.remove(txId);
+                closed = true;
+            }
         }
     }
 
     @Override
     public void rollback() throws BackendException {
-        try {
-            log.debug("Aborting");
-            jdbcConn.rollback();
-            jdbcConn.close();
-        } catch (SQLException e) {
-            throw new PermanentBackendException("Rollback failed", e);
-        } finally {
-            txs.remove(txId);
+        if (!closed) {
+            try {
+                log.debug("Aborting");
+                jdbcConn.rollback();
+                jdbcConn.close();
+            } catch (SQLException e) {
+                throw new PermanentBackendException("Rollback failed", e);
+            } finally {
+                txs.remove(txId);
+                closed = true;
+            }
         }
     }
 
     Connection getJdbcConn() {
-        return jdbcConn;
+        return closed ? null : jdbcConn;
     }
 }

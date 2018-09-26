@@ -53,4 +53,8 @@ public class KeySelector {
         return count >= limit;
     }
 
+    @Override
+    public String toString() {
+        return "predicate: (" + keyFilter.toString() + ") limit: " + limit;
+    }
 }

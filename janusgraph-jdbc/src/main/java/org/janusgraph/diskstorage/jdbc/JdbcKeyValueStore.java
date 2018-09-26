@@ -167,11 +167,13 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
             stmt.setBytes(2, query.getEnd().getBytes(0, query.getEnd().length()));
             ResultSet rs = stmt.executeQuery();
             // Don't call this again, as getKeySelector creates a new KeySelector every time
-            // (brilliant, eh?)
             KeySelector selector = query.getKeySelector();
+            log.debug("XXX selector is " + selector.toString());
             while (rs.next()) {
                 StaticBuffer key = new StaticArrayBuffer(rs.getBytes(KEY_VALUE_TABLE_KEY));
+                log.debug("XXX key is " + key.toString());
                 if (selector.include(key)) {
+                    log.debug("XXX key accepted");
                     result.add(new KeyValueEntry(key,
                         new StaticArrayBuffer(rs.getBytes(KEY_VALUE_TABLE_VALUE))));
                 }

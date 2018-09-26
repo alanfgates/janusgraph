@@ -46,6 +46,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -199,9 +200,27 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
         for (String store : allStores) {
             try (Connection conn = getJdbcConn()) {
                 try (Statement stmt = conn.createStatement()) {
-                    String sql = "delete from " + STORES_TABLE;
-                    log.debug("Going to run " + sql);
-                    stmt.execute(sql);
+                    String sql = "select " + STORES_NAME + " from " + STORES_TABLE;
+                    log.debug("Going to execute " + sql);
+                    // Need to read out the results first, else the intermittent commits can
+                    // screw with the result set.
+                    List<String> stores = new ArrayList<>();
+                    ResultSet rs = stmt.executeQuery(sql);
+                    while (rs.next()) {
+                        stores.add(rs.getString(STORES_NAME));
+                    }
+
+                    for (String storeName : stores) {
+                        sql = "drop table " + storeName;
+                        log.debug("Going to execute " + sql);
+                        stmt.execute(sql);
+                        sql = "delete from " + STORES_TABLE + " where " + STORES_NAME + " = '" +
+                            storeName + "'";
+                        log.debug("Going to execute " + sql);
+                        stmt.execute(sql);
+                        // Commit after each drop to avoid overloading the WAL
+                        conn.commit();
+                    }
                 }
             } catch (SQLException e) {
                 throw new TemporaryBackendException("Unable to connect to database or drop tables", e);
