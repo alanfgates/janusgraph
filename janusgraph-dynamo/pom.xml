@@ -10,13 +10,8 @@
     <name>JanusGraph-DynamoDB</name>
     <url>http://janusgraph.org</url>
     <properties>
-        <astyanax.version>3.8.0</astyanax.version>
-        <jamm.group>com.github.jbellis</jamm.group>
-        <dependency.plugin.version>2.8</dependency.plugin.version>
-        <test.extra.jvm.opts>-javaagent:${basedir}/target/jamm-${jamm.version}.jar</test.extra.jvm.opts>
-        <default.test.jvm.opts>-Xms256m -Xmx1280m -ea -XX:+HeapDumpOnOutOfMemoryError ${test.extra.jvm.opts}</default.test.jvm.opts>
-        <mem.jvm.opts>-Xms256m -Xmx768m -ea -XX:+HeapDumpOnOutOfMemoryError ${test.extra.jvm.opts}</mem.jvm.opts>
-        <top.level.basedir>${basedir}/..</top.level.basedir>
+        <aws.version>1.11.498</aws.version>
+        <dynamodblocal.version>1.11.119</dynamodblocal.version>
     </properties>
     <!-- Libraries -->
     
@@ -34,14 +29,8 @@
         </dependency>
         <dependency>
             <groupId>com.amazonaws</groupId>
-            <artifactId>DynamoDBLocal</artifactId>
-            <version>1.11.119</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.apache.logging.log4j</groupId>
-                    <artifactId>log4j-api</artifactId>
-                </exclusion>
-            </exclusions>
+            <artifactId>aws-java-sdk-dynamodb</artifactId>
+            <version>${aws.version}</version>
         </dependency>
     </dependencies>
 

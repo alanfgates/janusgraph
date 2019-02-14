@@ -60,7 +60,7 @@ import java.util.Map;
 
 public class DynamoStore implements KeyColumnValueStore {
 
-    static final String DEFAULT_DYNAMO_TABLE_BASE = DynamoStoreManager.NAME + "-";
+    private static final String DEFAULT_DYNAMO_TABLE_BASE = DynamoStoreManager.NAME + "-";
     public static final ConfigOption<String> DYNAMO_TABLE_BASE = new ConfigOption<>(Utils.DYNAMO_NS,
         "dynamo-table-base", "Basename for tables to be created in dynamoDB", ConfigOption.Type.FIXED, // TODO not sure if this should be FIXED or LOCAL
         DEFAULT_DYNAMO_TABLE_BASE);

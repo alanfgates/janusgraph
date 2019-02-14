@@ -61,6 +61,11 @@ import static org.janusgraph.diskstorage.dynamo.DynamoStore.SORT_KEY;
  *
  * @see <a href="https://docs.janusgraph.org/0.1.1/data-model.html">JanusGraph Data Model</a>
  * @see <a href="https://d1.awsstatic.com/whitepapers/AWS_Comparing_the_Use_of_DynamoDB_and_HBase_for_NoSQL.pdf>Comparing the Use of Amazon DynamoDB and Apache HBase for NoSQL</a>
+ *
+ * <p>Nothing special happens here regarding credentials.  We use the standard Amazon method of gathering
+ * crecentials, environment variables, system properties or the ~/.aws/credentials file.</p>
+ *
+ * @see <a href="https://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html">Working with AWS Credentials</a>
  */
 public class DynamoStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
 
@@ -146,6 +151,8 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     @Override
     public void close() throws BackendException {
         clearStores();
+        if (dynamo != null) dynamo.shutdown();
+        dynamo = null;
 
     }
 
@@ -183,11 +190,7 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     }
 
     private DynamoStore getStore(String storeName) throws BackendException {
-        DynamoStore store = stores.get(storeName);
-        if (store == null) {
-            stores.put(storeName, new DynamoStore(this, storageConfig, storeName));
-        }
-        return store;
+        return stores.computeIfAbsent(storeName, name -> new DynamoStore(this, storageConfig, name));
     }
 
     private void clearStores() throws BackendException {

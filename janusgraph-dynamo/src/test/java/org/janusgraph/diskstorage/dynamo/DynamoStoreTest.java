@@ -13,5 +13,28 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
-public class DynamoStoreTest {
+import org.janusgraph.diskstorage.BackendException;
+import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
+import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+
+import java.io.IOException;
+
+public class DynamoStoreTest extends KeyColumnValueStoreTest {
+
+    @BeforeClass
+    public static void startDynamo() throws IOException, InterruptedException {
+        TestUtils.startDockerDynamo();
+    }
+
+    @AfterClass
+    public static void stopDynamo() throws IOException, InterruptedException {
+        TestUtils.shutdownDockerDynamo();
+    }
+
+    @Override
+    public KeyColumnValueStoreManager openStorageManager() {
+        return new DynamoStoreManager(TestUtils.getConfig());
+    }
 }
