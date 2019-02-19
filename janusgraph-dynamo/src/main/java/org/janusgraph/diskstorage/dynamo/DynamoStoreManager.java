@@ -17,15 +17,11 @@ package org.janusgraph.diskstorage.dynamo;
 import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
-import com.amazonaws.services.dynamodbv2.document.BatchWriteItemOutcome;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
-import com.amazonaws.services.dynamodbv2.document.Item;
-import com.amazonaws.services.dynamodbv2.document.TableWriteItems;
 import com.amazonaws.services.dynamodbv2.document.spec.BatchWriteItemSpec;
 import com.google.common.base.Preconditions;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
-import org.janusgraph.diskstorage.Entry;
 import org.janusgraph.diskstorage.StaticBuffer;
 import org.janusgraph.diskstorage.StoreMetaData;
 import org.janusgraph.diskstorage.TemporaryBackendException;
@@ -45,10 +41,6 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.COL_NAME;
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.PARTITION_KEY;
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.SORT_KEY;
 
 /**
  * StoreManager that stores data in Amazon's DynamoDB.  All of the data is stored in a table per store.  The name
@@ -93,11 +85,7 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
 
     @Override
     public void mutateMany(Map<String, Map<StaticBuffer, KCVMutation>> mutations, StoreTransaction txh) throws BackendException {
-        BatchWriteItemSpec batchSpec = new BatchWriteItemSpec();
-        // Per the DynamoDB docs, you can only do 25 batched items per call.  The BatchedWriteItemOutcome
-        // includes a list of unprocessed items, and the interface has a call to pass back unprocessed items
-        // to Dynamo.  I'm guessing I can just stack everything in one request, it will process as many
-        // as it does, and then I can keep passing it back the unprocessed items until they reach zero.
+        MutationCollector collector = new MutationCollector();
         for (Map.Entry<String, Map<StaticBuffer, KCVMutation>> topEntry : mutations.entrySet()) {
             DynamoStore store = getStore(topEntry.getKey());
             // Table creation in the stores is lazy, as is store creation.  If the preceding line created a store,
@@ -105,39 +93,13 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
             // fail.
             store.getTable();
             String tableName = store.getTableName();
-            for (Map.Entry<StaticBuffer, KCVMutation> e : topEntry.getValue().entrySet()) {
-                StaticBuffer hashKey = e.getKey();
-                TableWriteItems tableOps = new TableWriteItems(tableName);
-                // Handle the deletions
-                for (StaticBuffer colToDrop : e.getValue().getDeletions()) {
-                    tableOps.addHashAndRangePrimaryKeyToDelete(PARTITION_KEY, hashKey.asByteBuffer(), SORT_KEY, colToDrop.asByteBuffer());
-                }
-                // Handle the insert
-                for (Entry entry : e.getValue().getAdditions()) {
-                    tableOps.addItemToPut(
-                        new Item()
-                            .withPrimaryKey(PARTITION_KEY, hashKey.asByteBuffer(), SORT_KEY, entry.getColumn().asByteBuffer())
-                            .withBinary(COL_NAME, entry.getValue().asByteBuffer())
-                    );
-                }
-                batchSpec.withTableWriteItems(tableOps);
-            }
+            collector.addMutationsForOneTable(tableName, topEntry.getValue());
         }
         try {
-            BatchWriteItemOutcome outcome = getDynamo().batchWriteItem(batchSpec);
-            // Make sure we're converging to zero
-            int itemsToGo = outcome.getUnprocessedItems().size();
-            while (itemsToGo > 0) {
-                outcome = getDynamo().batchWriteItemUnprocessed(outcome.getUnprocessedItems());
-                if (outcome.getUnprocessedItems().size() >= itemsToGo) {
-                    LOG.error("Failing to make progress writing batch items, last time we had " +
-                        itemsToGo + ", this time we have " + outcome.getUnprocessedItems().size());
-                    throw new TemporaryBackendException("Failed to make progress writing batch items");
-                }
-                itemsToGo = outcome.getUnprocessedItems().size();
+            for (BatchWriteItemSpec batchSpec : collector) {
+                getDynamo().batchWriteItem(batchSpec);
             }
         } catch (Exception e) {
-            if (e instanceof TemporaryBackendException) throw e;
             LOG.error("Failed to write batch items", e);
             throw new TemporaryBackendException("Failed to write batch items", e);
         }

@@ -13,7 +13,6 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
-import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
 import org.junit.AfterClass;
