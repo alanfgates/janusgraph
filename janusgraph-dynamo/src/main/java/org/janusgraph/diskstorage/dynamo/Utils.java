@@ -15,7 +15,6 @@
 package org.janusgraph.diskstorage.dynamo;
 
 import org.janusgraph.diskstorage.configuration.ConfigNamespace;
-import org.janusgraph.diskstorage.configuration.ConfigOption;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 
 class Utils {

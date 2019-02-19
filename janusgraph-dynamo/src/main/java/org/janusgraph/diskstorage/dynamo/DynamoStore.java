@@ -16,14 +16,18 @@ package org.janusgraph.diskstorage.dynamo;
 
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.ItemCollection;
+import com.amazonaws.services.dynamodbv2.document.QueryFilter;
 import com.amazonaws.services.dynamodbv2.document.QueryOutcome;
+import com.amazonaws.services.dynamodbv2.document.RangeKeyCondition;
 import com.amazonaws.services.dynamodbv2.document.ScanOutcome;
 import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.TableCollection;
 import com.amazonaws.services.dynamodbv2.document.spec.QuerySpec;
 import com.amazonaws.services.dynamodbv2.document.spec.ScanSpec;
 import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
 import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
 import com.amazonaws.services.dynamodbv2.model.KeyType;
+import com.amazonaws.services.dynamodbv2.model.ListTablesResult;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import org.janusgraph.diskstorage.BackendException;
@@ -52,6 +56,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -95,20 +100,28 @@ public class DynamoStore implements KeyColumnValueStore {
     @Override
     public EntryList getSlice(KeySliceQuery query, StoreTransaction txh) throws BackendException {
         try {
-            Map<String, Object> valMap = new HashMap<>();
-            valMap.put(":lowerbound", query.getSliceStart().asByteBuffer());
-            valMap.put(":upperbound", query.getSliceEnd().asByteBuffer());
+            // The query spec doesn't allow more than one operation on a range key, thus I can't pass a filter like
+            // range key >= begin and range key < end, which is what I need since JG queries are inclusive of the
+            // slice start but exclusive of the slice end.  So, I use between to get inclusive on the sort key on
+            // both start and end.  Dynamo also won't let you run a filter on a primary key, so you can't just
+            // append a query filter to the query to get rid of any key values that are equal to the end of the slice
+            // To get around these insane and irritating limitations I run the query as a between and then
+            // do a quick != check on the sort key of the returned values.
             QuerySpec querySpec = new QuerySpec()
                 .withHashKey(PARTITION_KEY, query.getKey().asByteBuffer())
-                .withKeyConditionExpression("#sk >= :lowerbound and #sk < :upperbound")
-                .withNameMap(Collections.singletonMap("#sk", SORT_KEY))
-                .withValueMap(valMap);
+                .withRangeKeyCondition(new RangeKeyCondition(SORT_KEY).between(query.getSliceStart().asByteBuffer(),
+                    query.getSliceEnd().asByteBuffer()));
 
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("Running getSlice query with key " + query.getKey().toString() +
+                    " beginning slice at " + query.getSliceStart().toString() + " and ending slice at " +
+                    query.getSliceEnd().toString());
+            }
             ItemCollection<QueryOutcome> results = getTable().query(querySpec);
-            return StaticArrayEntryList.ofByteBuffer(results, dynamoEntryGetter);
+            return StaticArrayEntryList.ofByteBuffer(pruneOutEndKey(results, query.getSliceEnd().asByteBuffer()), dynamoEntryGetter);
         } catch (Exception e) {
             LOG.error("Failed to run query", e);
-            throw new TemporaryBackendException("Failed to run query e");
+            throw new TemporaryBackendException("Failed to run query", e);
         }
     }
 
@@ -242,7 +255,18 @@ public class DynamoStore implements KeyColumnValueStore {
 
     Table getTable() throws BackendException {
         if (table == null) {
-            table = manager.getDynamo().getTable(tableName);
+            // So when you call DynamoDB.getTable() it doesn't actually get the table.  It just gives you a handle
+            // based on the table name.  So you can't use it to tell whether the table exists.  Instead, you have
+            // to get a listing of the existing tables and look for your table name.  Who writes APIs like this?
+            TableCollection<ListTablesResult> existingTables =
+                manager.getDynamo().listTables(conf.get(DYNAMO_TABLE_BASE));
+            for (Table maybe : existingTables) {
+                if (maybe.getTableName().equals(tableName)) {
+                    table = maybe;
+                    break;
+                }
+            }
+            // We didn't find it in the list, so we need to create it.
             if (table == null) {
                 LOG.info("Unable to find table " + tableName + ", will create it");
                 table = manager.getDynamo().createTable(tableName,
@@ -250,7 +274,7 @@ public class DynamoStore implements KeyColumnValueStore {
                         new KeySchemaElement(PARTITION_KEY, KeyType.HASH),
                         new KeySchemaElement(SORT_KEY, KeyType.RANGE)
                     ), Arrays.asList(
-                        new AttributeDefinition(PARTITION_KEY, ScalarAttributeType.S),
+                        new AttributeDefinition(PARTITION_KEY, ScalarAttributeType.B),
                         new AttributeDefinition(SORT_KEY, ScalarAttributeType.B)
                     ), new ProvisionedThroughput(conf.get(DYNAMO_READ_THROUGHPUT), conf.get(DYNAMO_WRITE_THROUGHPUT)));
                 try {
@@ -284,5 +308,13 @@ public class DynamoStore implements KeyColumnValueStore {
             throw new UnsupportedOperationException();
         }
     };
+
+    private Collection<Item> pruneOutEndKey(ItemCollection<QueryOutcome> results, ByteBuffer end) {
+        List<Item> pruned = new ArrayList<>();
+        for (Item item : results) {
+            if (!item.getByteBuffer(SORT_KEY).equals(end)) pruned.add(item);
+        }
+        return pruned;
+    }
 
 }
