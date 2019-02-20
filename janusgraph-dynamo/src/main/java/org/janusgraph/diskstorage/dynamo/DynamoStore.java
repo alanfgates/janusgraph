@@ -236,6 +236,7 @@ public class DynamoStore implements KeyColumnValueStore {
     @Override
     public void close() throws BackendException {
         manager.getDynamo().shutdown();
+        table = null;
     }
 
     String getTableName() {

@@ -32,7 +32,10 @@ class TestUtils {
     private static final String BASE_CONTAINER_NAME = "janus-dynamo-test-";
     private static final String PORT_MAPPING = "8000:8000";
 
-    private static String containerName = genContainerName();
+    static void setFakeCredentials() {
+        System.setProperty("aws.accessKeyId", "abc");
+        System.setProperty("aws.secretKey", "123");
+    }
 
     static ModifiableConfiguration getConfig() {
         ModifiableConfiguration config = GraphDatabaseConfiguration.buildGraphConfiguration();
@@ -43,22 +46,23 @@ class TestUtils {
         return config;
     }
 
-    static void startDockerDynamo() throws IOException, InterruptedException {
-        // Not clear if I need these or not
-        System.setProperty("aws.accessKeyId", "abc");
-        System.setProperty("aws.secretKey", "123");
-        LOG.info("Starting DynamoDB in a container");
-        if (runCmdAndPrintStreams(new String[] {"docker", "run", "--name", containerName, "-p", PORT_MAPPING, "-d",
+    static String startDockerDynamo() throws IOException, InterruptedException {
+        String name = genContainerName();
+        LOG.info("Starting DynamoDB in a container with name " + name);
+        if (runCmdAndPrintStreams(new String[] {"docker", "run", "--name", name, "-p", PORT_MAPPING, "-d",
             IMAGE_NAME}, 300) != 0) {
             throw new IOException("Failed to run docker image");
         }
+        return name;
     }
 
-    static void shutdownDockerDynamo() throws IOException, InterruptedException {
+    static void shutdownDockerDynamo(String name) throws IOException, InterruptedException {
+        if (name == null) return;
         LOG.info("Shutting down DynamoDB in docker container");
-        if (runCmdAndPrintStreams(new String[]{"docker", "stop", containerName}, 30) != 0) {
+        if (runCmdAndPrintStreams(new String[]{"docker", "stop", name}, 30) != 0) {
             throw new IOException("Failed to stop docker container");
         }
+        runCmdAndPrintStreams(new String[] {"docker", "rm", name}, 30);
     }
 
     private static class ProcessResults {
@@ -106,7 +110,7 @@ class TestUtils {
     }
 
     private static String genContainerName() {
-        return BASE_CONTAINER_NAME + new Random().nextInt(1000000);
+        return BASE_CONTAINER_NAME + Math.abs(new Random().nextInt());
     }
 
 }
