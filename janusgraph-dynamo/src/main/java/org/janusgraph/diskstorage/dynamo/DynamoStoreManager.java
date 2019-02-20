@@ -18,7 +18,17 @@ import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Item;
+import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.TableCollection;
 import com.amazonaws.services.dynamodbv2.document.spec.BatchWriteItemSpec;
+import com.amazonaws.services.dynamodbv2.document.spec.ScanSpec;
+import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
+import com.amazonaws.services.dynamodbv2.model.ListTablesResult;
+import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
+import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import com.google.common.base.Preconditions;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
@@ -38,9 +48,14 @@ import org.janusgraph.diskstorage.keycolumnvalue.StoreTransaction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_READ_THROUGHPUT;
+import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_TABLE_BASE;
+import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_WRITE_THROUGHPUT;
 
 /**
  * StoreManager that stores data in Amazon's DynamoDB.  All of the data is stored in a table per store.  The name
@@ -58,6 +73,9 @@ import java.util.Map;
  * crecentials, environment variables, system properties or the ~/.aws/credentials file.</p>
  *
  * @see <a href="https://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html">Working with AWS Credentials</a>
+ *
+ * <p>All of the various stores are tracked in a table called the storesTable.  This allows us to properly track whether
+ * any stores exist and all the stores we need to clear if someone calls clearStorage.</p>
  */
 public class DynamoStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
 
@@ -67,10 +85,13 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     public static final ConfigOption<String> DYNAMO_URL = new ConfigOption<>(Utils.DYNAMO_NS,
         "dynamo-url", "URL to connect to DynamoDB", ConfigOption.Type.LOCAL, String.class);
 
+    private static final String STORES_TABLE_NAME = "storestable";
+    private static final String STORES_TABLE_PART_KEY = "name";
     private static final Logger LOG = LoggerFactory.getLogger(DynamoStoreManager.class);
 
     private final Map<String, DynamoStore> stores; // Don't access directly, use getStore()
     private DynamoDB dynamo; // connection to dynamo, don't access directly, call getDynamo()
+    private Table storesTable; // handle for the table that store names of tables we are using in Dynamo.  Don't access direclty, call getStoresTable()
 
     public DynamoStoreManager(Configuration conf) {
         super(conf);
@@ -115,18 +136,32 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         clearStores();
         if (dynamo != null) dynamo.shutdown();
         dynamo = null;
+        storesTable = null;
 
     }
 
     @Override
     public void clearStorage() throws BackendException {
-        for (DynamoStore store : stores.values()) store.drop();
-        clearStores();
+        try {
+            for (Item storeInfo : getAllStores()) {
+                // Go around getStore() here, because it does a bunch of stuff we don't need
+                String storeName = storeInfo.getString(STORES_TABLE_PART_KEY);
+                DynamoStore store = stores.get(storeName);
+                if (store == null) store = new DynamoStore(this, storageConfig, storeName);
+                store.drop();
+                getStoresTable().deleteItem(STORES_TABLE_PART_KEY, storeName);
+            }
+            clearStores();
+        } catch (Exception e) {
+            LOG.error("Failed to clear storage", e);
+            throw new TemporaryBackendException("Failed to clear storage", e);
+        }
     }
 
     @Override
     public boolean exists() throws BackendException {
-        return true; // TODO - don't know if this is right, but I'm not sure what existence means here
+        // If there's at least one store, than we exist
+        return getAllStores().iterator().hasNext();
     }
 
     @Override
@@ -151,15 +186,6 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         // There's no notion of local in Dynamo, so we don't support this
     }
 
-    private DynamoStore getStore(String storeName) throws BackendException {
-        return stores.computeIfAbsent(storeName, name -> new DynamoStore(this, storageConfig, name));
-    }
-
-    private void clearStores() throws BackendException {
-        for (DynamoStore store : stores.values()) store.close();
-        stores.clear();
-    }
-
     DynamoDB getDynamo() {
         if (dynamo == null) {
             Preconditions.checkArgument(storageConfig.has(DYNAMO_URL) && storageConfig.has(DYNAMO_REGION));
@@ -177,6 +203,74 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
             dynamo = new DynamoDB(client);
         }
         return dynamo;
+    }
+
+    private DynamoStore getStore(String storeName) throws BackendException {
+        DynamoStore store = stores.get(storeName);
+        if (store == null) {
+            store = addStore(storeName);
+            stores.put(storeName, store);
+        }
+        return store;
+    }
+
+    // This just removes our record of the stores.  It doesn't actually drop the underlying tables
+    private void clearStores() throws BackendException {
+        for (DynamoStore store : stores.values()) store.close();
+        stores.clear();
+    }
+
+    private DynamoStore addStore(String storeName) throws BackendException {
+        // See if the store exists, if not, add it
+        try {
+            Item item = getStoresTable().getItem(STORES_TABLE_PART_KEY, storeName);
+            if (item == null) {
+                // This store doesn't exist yet, so we need to record it
+                getStoresTable().putItem(new Item().withPrimaryKey(STORES_TABLE_PART_KEY, storeName));
+            }
+            return new DynamoStore(this, storageConfig, storeName);
+        } catch (Exception e) {
+            LOG.error("Failed to fetch information about the store in the table table", e);
+            throw new TemporaryBackendException("Failed to fetch information about the store", e);
+        }
+    }
+
+    private Table getStoresTable() throws BackendException {
+        if (storesTable == null) {
+            String tableName = storageConfig.get(DYNAMO_TABLE_BASE) + STORES_TABLE_NAME;
+            TableCollection<ListTablesResult> existingTables = getDynamo().listTables(storageConfig.get(DYNAMO_TABLE_BASE));
+            for (Table maybe : existingTables) {
+                if (maybe.getTableName().equals(tableName)) {
+                    storesTable = maybe;
+                    break;
+                }
+            }
+            // We didn't find it in the list, so we need to create it.
+            if (storesTable == null) {
+                LOG.info("Unable to find table " + tableName + ", will create it");
+                storesTable = getDynamo().createTable(tableName,
+                    Collections.singletonList(new KeySchemaElement(STORES_TABLE_PART_KEY, KeyType.HASH)),
+                    Collections.singletonList(new AttributeDefinition(STORES_TABLE_PART_KEY, ScalarAttributeType.S)),
+                    new ProvisionedThroughput(storageConfig.get(DYNAMO_READ_THROUGHPUT), storageConfig.get(DYNAMO_WRITE_THROUGHPUT)));
+                try {
+                    storesTable.waitForActive();
+                } catch (InterruptedException e) {
+                    throw new TemporaryBackendException("Interupted waiting for table to be active", e);
+                }
+            }
+        }
+        return storesTable;
+    }
+
+    // This returns a list of all of the stores that have been created, not just the ones cached in this instance.
+    private Iterable<Item> getAllStores() throws BackendException {
+        try {
+            return getStoresTable().scan(new ScanSpec());
+        } catch (Exception e) {
+            LOG.error("Failed to scan storesTable to find all existing stores");
+            throw new TemporaryBackendException("Failed to scan storesTable to find all existing stores", e);
+        }
+
     }
 
 }

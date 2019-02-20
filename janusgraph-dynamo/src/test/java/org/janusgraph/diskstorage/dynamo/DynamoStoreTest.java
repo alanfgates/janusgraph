@@ -15,21 +15,26 @@ package org.janusgraph.diskstorage.dynamo;
 
 import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
+import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
 
 import java.io.IOException;
 
 public class DynamoStoreTest extends KeyColumnValueStoreTest {
 
+    private static String containerName;
+
     @BeforeClass
     public static void startDynamo() throws IOException, InterruptedException {
-        TestUtils.startDockerDynamo();
+        TestUtils.setFakeCredentials();
+        containerName = TestUtils.startDockerDynamo();
     }
 
     @AfterClass
     public static void stopDynamo() throws IOException, InterruptedException {
-        TestUtils.shutdownDockerDynamo();
+        TestUtils.shutdownDockerDynamo(containerName);
     }
 
     @Override
