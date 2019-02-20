@@ -16,9 +16,9 @@ package org.janusgraph.diskstorage.dynamo;
 
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.ItemCollection;
-import com.amazonaws.services.dynamodbv2.document.QueryFilter;
 import com.amazonaws.services.dynamodbv2.document.QueryOutcome;
 import com.amazonaws.services.dynamodbv2.document.RangeKeyCondition;
+import com.amazonaws.services.dynamodbv2.document.ScanFilter;
 import com.amazonaws.services.dynamodbv2.document.ScanOutcome;
 import com.amazonaws.services.dynamodbv2.document.Table;
 import com.amazonaws.services.dynamodbv2.document.TableCollection;
@@ -156,17 +156,13 @@ public class DynamoStore implements KeyColumnValueStore {
         // it can return the iterator to the caller.  If this is called frequently we might want to create
         // a secondary table that maps janus columns to janus keys so we can do this efficiently.
         try {
-            Map<String, Object> valMap = new HashMap<>();
-            valMap.put(":lowerbound", query.getSliceStart().asByteBuffer());
-            valMap.put(":upperbound", query.getSliceEnd().asByteBuffer());
             ScanSpec scanSpec = new ScanSpec()
-                .withFilterExpression("#sk >= :lowerbound and #sk < :upperbound")
-                .withNameMap(Collections.singletonMap("#sk", SORT_KEY))
-                .withValueMap(valMap);
+                .withScanFilters(new ScanFilter(SORT_KEY).between(query.getSliceStart().as(StaticBuffer.ARRAY_FACTORY),
+                    query.getSliceEnd().as(StaticBuffer.ARRAY_FACTORY)));
 
             ItemCollection<ScanOutcome> results = getTable().scan(scanSpec);
             final Map<ByteBuffer, List<Item>> byKey = new HashMap<>();
-            for (Item item : results) {
+            for (Item item : pruneOutEndKey(results, query.getSliceEnd().asByteBuffer())) {
                 ByteBuffer hashKey = item.getByteBuffer(PARTITION_KEY);
                 List<Item> itemsForThisKey = byKey.computeIfAbsent(hashKey, byteBuffer -> new ArrayList<>());
                 itemsForThisKey.add(item);
@@ -223,7 +219,8 @@ public class DynamoStore implements KeyColumnValueStore {
             };
 
         } catch (Exception e) {
-            LOG.error("Failed to run scan", e);
+            LOG.error("Failed to run scan, query start was " + query.getSliceStart().toString() +
+                " and query end was " + query.getSliceEnd().toString(), e);
             throw new TemporaryBackendException("Failed to run scan e");
         }
     }
@@ -310,7 +307,7 @@ public class DynamoStore implements KeyColumnValueStore {
         }
     };
 
-    private Collection<Item> pruneOutEndKey(ItemCollection<QueryOutcome> results, ByteBuffer end) {
+    private Collection<Item> pruneOutEndKey(ItemCollection<?> results, ByteBuffer end) {
         List<Item> pruned = new ArrayList<>();
         for (Item item : results) {
             if (!item.getByteBuffer(SORT_KEY).equals(end)) pruned.add(item);
