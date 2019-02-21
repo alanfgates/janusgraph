@@ -56,12 +56,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+
+import static org.janusgraph.diskstorage.dynamo.Utils.unsignedBytesFactory;
+import static org.janusgraph.diskstorage.dynamo.Utils.unsignedBytesToBytes;
 
 public class DynamoStore implements KeyColumnValueStore {
 
@@ -107,10 +110,11 @@ public class DynamoStore implements KeyColumnValueStore {
             // append a query filter to the query to get rid of any key values that are equal to the end of the slice
             // To get around these insane and irritating limitations I run the query as a between and then
             // do a quick != check on the sort key of the returned values.
+            byte[] sliceEnd = query.getSliceEnd().as(unsignedBytesFactory);
             QuerySpec querySpec = new QuerySpec()
-                .withHashKey(PARTITION_KEY, query.getKey().asByteBuffer())
-                .withRangeKeyCondition(new RangeKeyCondition(SORT_KEY).between(query.getSliceStart().asByteBuffer(),
-                    query.getSliceEnd().asByteBuffer()));
+                .withHashKey(PARTITION_KEY, query.getKey().as(StaticBuffer.ARRAY_FACTORY))
+                .withRangeKeyCondition(new RangeKeyCondition(SORT_KEY).between(query.getSliceStart().as(unsignedBytesFactory),
+                    sliceEnd));
 
             if (LOG.isTraceEnabled()) {
                 LOG.trace("Running getSlice query with key " + query.getKey().toString() +
@@ -118,7 +122,7 @@ public class DynamoStore implements KeyColumnValueStore {
                     query.getSliceEnd().toString());
             }
             ItemCollection<QueryOutcome> results = getTable().query(querySpec);
-            return StaticArrayEntryList.ofByteBuffer(pruneOutEndKey(results, query.getSliceEnd().asByteBuffer()), dynamoEntryGetter);
+            return StaticArrayEntryList.ofBytes(applyLimit(pruneOutEndKey(results, sliceEnd), query), dynamoEntryGetter);
         } catch (Exception e) {
             LOG.error("Failed to run query", e);
             throw new TemporaryBackendException("Failed to run query", e);
@@ -156,15 +160,18 @@ public class DynamoStore implements KeyColumnValueStore {
         // it can return the iterator to the caller.  If this is called frequently we might want to create
         // a secondary table that maps janus columns to janus keys so we can do this efficiently.
         try {
+            byte[] sliceEnd = query.getSliceEnd().as(unsignedBytesFactory);
             ScanSpec scanSpec = new ScanSpec()
-                .withScanFilters(new ScanFilter(SORT_KEY).between(query.getSliceStart().as(StaticBuffer.ARRAY_FACTORY),
-                    query.getSliceEnd().as(StaticBuffer.ARRAY_FACTORY)));
+                .withScanFilters(new ScanFilter(SORT_KEY).between(query.getSliceStart().as(unsignedBytesFactory),
+                    sliceEnd));
 
             ItemCollection<ScanOutcome> results = getTable().scan(scanSpec);
+            // We wrap the partition key in a ByteBuffer before sticking it in the map because ByteBuffers return
+            // reasonable equals() and hashCode() values for use in hashing.
             final Map<ByteBuffer, List<Item>> byKey = new HashMap<>();
-            for (Item item : pruneOutEndKey(results, query.getSliceEnd().asByteBuffer())) {
-                ByteBuffer hashKey = item.getByteBuffer(PARTITION_KEY);
-                List<Item> itemsForThisKey = byKey.computeIfAbsent(hashKey, byteBuffer -> new ArrayList<>());
+            for (Item item : pruneOutEndKey(results, sliceEnd)) {
+                byte[] hashKey = item.getBinary(PARTITION_KEY);
+                List<Item> itemsForThisKey = byKey.computeIfAbsent(ByteBuffer.wrap(hashKey), byteBuffer -> new ArrayList<>());
                 itemsForThisKey.add(item);
             }
             return new KeyIterator() {
@@ -175,7 +182,10 @@ public class DynamoStore implements KeyColumnValueStore {
                 @Override
                 public RecordIterator<Entry> getEntries() {
                     return new RecordIterator<Entry>() {
-                        Iterator<Item> innerIter = curVal.getValue().iterator();
+                        // AFAIK there's no guarantee that the items comes back from the Dynamo scan in any order
+                        // I'm guessing JanusGraph expects them to come back in colname order.  So sort them here.
+                        // And apply the limit if there is one.
+                        Iterator<Item> innerIter = applyLimit(sortColNames(curVal.getValue()), query).iterator();
                         boolean innerClosed = false;
 
                         // The HBase implementation closes the outer iterator if the inner iterator is closed, but
@@ -194,7 +204,7 @@ public class DynamoStore implements KeyColumnValueStore {
                         @Override
                         public Entry next() {
                             if (innerClosed) throw new IllegalStateException("Attempt to access closed iterator");
-                            return StaticArrayEntry.ofByteBuffer(innerIter.next(), dynamoEntryGetter);
+                            return StaticArrayEntry.ofBytes(innerIter.next(), dynamoEntryGetter);
                         }
                     };
                 }
@@ -214,7 +224,7 @@ public class DynamoStore implements KeyColumnValueStore {
                 public StaticBuffer next() {
                     if (closed) throw new IllegalStateException("Attempt to access closed iterator");
                     curVal = iter.next();
-                    return StaticArrayBuffer.of(curVal.getKey());
+                    return StaticArrayBuffer.of(curVal.getKey().array());
                 }
             };
 
@@ -285,15 +295,15 @@ public class DynamoStore implements KeyColumnValueStore {
         return table;
     }
 
-    private final StaticArrayEntry.GetColVal<Item, ByteBuffer> dynamoEntryGetter = new StaticArrayEntry.GetColVal<Item, ByteBuffer>() {
+    private final StaticArrayEntry.GetColVal<Item, byte[]> dynamoEntryGetter = new StaticArrayEntry.GetColVal<Item, byte[]>() {
         @Override
-        public ByteBuffer getColumn(Item element) {
-            return element.getByteBuffer(SORT_KEY);
+        public byte[] getColumn(Item element) {
+            return unsignedBytesToBytes(element.getBinary(SORT_KEY));
         }
 
         @Override
-        public ByteBuffer getValue(Item element) {
-            return element.getByteBuffer(COL_NAME);
+        public byte[] getValue(Item element) {
+            return element.getBinary(COL_NAME);
         }
 
         @Override
@@ -307,12 +317,22 @@ public class DynamoStore implements KeyColumnValueStore {
         }
     };
 
-    private Collection<Item> pruneOutEndKey(ItemCollection<?> results, ByteBuffer end) {
+    private List<Item> pruneOutEndKey(ItemCollection<?> results, byte[] end) {
         List<Item> pruned = new ArrayList<>();
         for (Item item : results) {
-            if (!item.getByteBuffer(SORT_KEY).equals(end)) pruned.add(item);
+            if (!Arrays.equals(item.getBinary(SORT_KEY), end)) pruned.add(item);
         }
         return pruned;
     }
+
+    private List<Item> applyLimit(List<Item> results, SliceQuery query) {
+        return query.hasLimit() && query.getLimit() < results.size() ? results.subList(0, query.getLimit()) : results;
+    }
+
+    private List<Item> sortColNames(List<Item> results) {
+        results.sort(Comparator.comparing(o -> o.getByteBuffer(SORT_KEY)));
+        return results;
+    }
+
 
 }

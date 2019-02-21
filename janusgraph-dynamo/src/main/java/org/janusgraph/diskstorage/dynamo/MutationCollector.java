@@ -33,6 +33,7 @@ import java.util.NoSuchElementException;
 import static org.janusgraph.diskstorage.dynamo.DynamoStore.COL_NAME;
 import static org.janusgraph.diskstorage.dynamo.DynamoStore.PARTITION_KEY;
 import static org.janusgraph.diskstorage.dynamo.DynamoStore.SORT_KEY;
+import static org.janusgraph.diskstorage.dynamo.Utils.unsignedBytesFactory;
 
 /**
  * Collects mutations for {@link DynamoStoreManager#mutateMany(Map, StoreTransaction)} and produces a set of
@@ -70,7 +71,8 @@ class MutationCollector implements Iterable<BatchWriteItemSpec> {
         void insertDelete(String tableName, StaticBuffer partitionKey, StaticBuffer sortKey) {
             assert cnt < MAX_BATCH_OPS;
             TableWriteItems twi = getTableWriteItems(tableName);
-            twi.addHashAndRangePrimaryKeyToDelete(PARTITION_KEY, partitionKey.asByteBuffer(), SORT_KEY, sortKey.asByteBuffer());
+            twi.addHashAndRangePrimaryKeyToDelete(PARTITION_KEY, partitionKey.as(StaticBuffer.ARRAY_FACTORY),
+                SORT_KEY, sortKey.as(unsignedBytesFactory));
             cnt++;
             containsDeletes = true;
         }
@@ -80,8 +82,8 @@ class MutationCollector implements Iterable<BatchWriteItemSpec> {
             TableWriteItems twi = getTableWriteItems(tableName);
             twi.addItemToPut(
                 new Item()
-                    .withPrimaryKey(PARTITION_KEY, partitionKey.asByteBuffer(), SORT_KEY, entry.getColumn().asByteBuffer())
-                    .withBinary(COL_NAME, entry.getValue().asByteBuffer())
+                    .withPrimaryKey(PARTITION_KEY, partitionKey.as(StaticBuffer.ARRAY_FACTORY), SORT_KEY, entry.getColumn().as(unsignedBytesFactory))
+                    .withBinary(COL_NAME, entry.getValue().as(StaticBuffer.ARRAY_FACTORY))
             );
             cnt++;
         }
