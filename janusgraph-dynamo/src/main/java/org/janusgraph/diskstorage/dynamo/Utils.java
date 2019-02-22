@@ -74,7 +74,6 @@ class Utils {
      */
     static byte[] unsignedBytesToBytes(byte[] unsigned) {
         assert unsigned.length % 2 == 0;
-
         byte[] signed = new byte[unsigned.length / 2];
         for (int i = 0; i < signed.length; i++) {
             signed[i] = (byte)((unsigned[i * 2] == 1 ? 0x80 : 0) | unsigned[i * 2 + 1]);
@@ -86,6 +85,17 @@ class Utils {
         }
         */
         return signed;
+    }
+
+    static String bytesToString(byte[] bytes) {
+        StringBuilder buf = new StringBuilder();
+        boolean first = true;
+        for (byte b : bytes) {
+            if (first) first = false;
+            else buf.append(",");
+            buf.append(b);
+        }
+        return buf.toString();
     }
 
 }

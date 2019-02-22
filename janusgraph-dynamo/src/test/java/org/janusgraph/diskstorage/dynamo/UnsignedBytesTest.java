@@ -42,9 +42,6 @@ public class UnsignedBytesTest {
         logBytes("zeroToMax:unsignedZero", unsignedZero);
         logBytes("zeroToMax:unsignedMax", unsignedMax);
 
-        //Assert.assertArrayEquals(new byte[]{0, 0}, unsignedZero);
-        //Assert.assertArrayEquals(new byte[]{1, 127, 1, 127, 1, 127, 1, 127}, unsignedMax);
-
         Assert.assertEquals(-1, unsignedComparator.compare(unsignedZero, unsignedMax));
 
         byte[] zeroAgain = unsignedBytesToBytes(unsignedZero);
@@ -69,9 +66,6 @@ public class UnsignedBytesTest {
 
         logBytes("positive:unsignedLower", unsignedLower);
         logBytes("positive:unsignedHigher", unsignedHigher);
-
-        //Assert.assertArrayEquals(new byte[]{0, 1, 0, 1}, unsignedLower);
-        //Assert.assertArrayEquals(new byte[]{0, 1, 0, 2}, unsignedHigher);
 
         Assert.assertEquals(-1, unsignedComparator.compare(unsignedLower, unsignedHigher));
 
@@ -98,9 +92,6 @@ public class UnsignedBytesTest {
         logBytes("negative:unsignedLower", unsignedLower);
         logBytes("negative:unsignedHigher", unsignedHigher);
 
-        //Assert.assertArrayEquals(new byte[]{1, 126}, unsignedLower);
-        //Assert.assertArrayEquals(new byte[]{1, 127}, unsignedHigher);
-
         Assert.assertEquals(-1, unsignedComparator.compare(unsignedLower, unsignedHigher));
 
         byte[] lowerAgain = unsignedBytesToBytes(unsignedLower);
@@ -126,9 +117,6 @@ public class UnsignedBytesTest {
         logBytes("aroundZero:unsignedLower", unsignedLower);
         logBytes("aroundZero:unsignedHigher", unsignedHigher);
 
-        //Assert.assertArrayEquals(new byte[]{1, 127}, unsignedLower);
-        //Assert.assertArrayEquals(new byte[]{0, 1}, unsignedHigher);
-
         Assert.assertEquals(1, unsignedComparator.compare(unsignedLower, unsignedHigher));
 
         byte[] lowerAgain = unsignedBytesToBytes(unsignedLower);
@@ -140,6 +128,7 @@ public class UnsignedBytesTest {
 
     @Test
     public void around7f() {
+        byte[] lowest = new byte[] {(byte)0x81};
         byte[] lower = new byte[] {(byte)0x80};
         byte[] higher = new byte[] {(byte)0x7f};
 
@@ -147,23 +136,25 @@ public class UnsignedBytesTest {
         logBytes("around7f:higher", higher);
 
         Assert.assertEquals(-1, unsignedComparator.compare(lower, higher));
+        Assert.assertEquals(1, unsignedComparator.compare(lowest, lower));
 
+        byte[] unsignedLowest = bytesToUnsignedBytes(lowest, 0, lower.length);
         byte[] unsignedLower = bytesToUnsignedBytes(lower, 0, lower.length);
         byte[] unsignedHigher = bytesToUnsignedBytes(higher, 0, higher.length);
 
         logBytes("around7f:unsignedLower", unsignedLower);
         logBytes("around7f:unsignedHigher", unsignedHigher);
 
-        //Assert.assertArrayEquals(new byte[]{1, 0}, unsignedLower);
-        //Assert.assertArrayEquals(new byte[]{0, 0x7f}, unsignedHigher);
-
         Assert.assertEquals(1, unsignedComparator.compare(unsignedLower, unsignedHigher));
+        Assert.assertEquals(1, unsignedComparator.compare(unsignedLowest, unsignedLower));
 
         byte[] lowerAgain = unsignedBytesToBytes(unsignedLower);
         byte[] higherAgain = unsignedBytesToBytes(unsignedHigher);
+        byte[] lowestAgain = unsignedBytesToBytes(unsignedLowest);
 
         Assert.assertArrayEquals(lower, lowerAgain);
         Assert.assertArrayEquals(higher, higherAgain);
+        Assert.assertArrayEquals(lowest, unsignedLowest);
     }
 
     private static Comparator<byte[]> unsignedComparator = (o1, o2) -> {
