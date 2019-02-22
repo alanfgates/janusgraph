@@ -20,14 +20,12 @@ import com.amazonaws.services.dynamodbv2.document.QueryOutcome;
 import com.amazonaws.services.dynamodbv2.document.RangeKeyCondition;
 import com.amazonaws.services.dynamodbv2.document.ScanFilter;
 import com.amazonaws.services.dynamodbv2.document.ScanOutcome;
-import com.amazonaws.services.dynamodbv2.document.Table;
-import com.amazonaws.services.dynamodbv2.document.TableCollection;
 import com.amazonaws.services.dynamodbv2.document.spec.QuerySpec;
 import com.amazonaws.services.dynamodbv2.document.spec.ScanSpec;
 import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
+import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
 import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
 import com.amazonaws.services.dynamodbv2.model.KeyType;
-import com.amazonaws.services.dynamodbv2.model.ListTablesResult;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import org.janusgraph.diskstorage.BackendException;
@@ -36,7 +34,6 @@ import org.janusgraph.diskstorage.EntryList;
 import org.janusgraph.diskstorage.EntryMetaData;
 import org.janusgraph.diskstorage.StaticBuffer;
 import org.janusgraph.diskstorage.TemporaryBackendException;
-import org.janusgraph.diskstorage.configuration.ConfigOption;
 import org.janusgraph.diskstorage.configuration.Configuration;
 import org.janusgraph.diskstorage.keycolumnvalue.KCVMutation;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStore;
@@ -52,7 +49,6 @@ import org.janusgraph.diskstorage.util.StaticArrayEntryList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -68,19 +64,6 @@ import static org.janusgraph.diskstorage.dynamo.Utils.unsignedBytesToBytes;
 
 public class DynamoStore implements KeyColumnValueStore {
 
-    private static final String DEFAULT_DYNAMO_TABLE_BASE = DynamoStoreManager.NAME + "-";
-    public static final ConfigOption<String> DYNAMO_TABLE_BASE = new ConfigOption<>(Utils.DYNAMO_NS,
-        "dynamo-table-base", "Basename for tables to be created in dynamoDB", ConfigOption.Type.FIXED, // TODO not sure if this should be FIXED or LOCAL
-        DEFAULT_DYNAMO_TABLE_BASE);
-    // TODO - no idea if these are reasonable values or not
-    private static final long DEFAULT_READ_THROUGHPUT = 10L;
-    private static final long DEFAULT_WRITE_THROUGHPUT = 10L;
-
-    public static final ConfigOption<Long> DYNAMO_READ_THROUGHPUT = new ConfigOption<>(Utils.DYNAMO_NS,
-        "dynamo-read-throughput", "Dynamo read capacity throughput", ConfigOption.Type.LOCAL, DEFAULT_READ_THROUGHPUT);
-    public static final ConfigOption<Long> DYNAMO_WRITE_THROUGHPUT = new ConfigOption<>(Utils.DYNAMO_NS,
-        "dynamo-write-throughput", "Dynamo write capacity throughput", ConfigOption.Type.LOCAL, DEFAULT_WRITE_THROUGHPUT);
-
     static final String PARTITION_KEY = "januskey"; // Column name of partition key in Dynamo, uses the JG key
     static final String SORT_KEY = "januscol"; // Column name of sort key in Dynamo, uses the JG column name
     static final String COL_NAME = "c"; // Column name we use in Dynamo, not related to anything in JG
@@ -90,19 +73,27 @@ public class DynamoStore implements KeyColumnValueStore {
     private final DynamoStoreManager manager;
     private final String storeName;
     private final String tableName;
-    private final Configuration conf;
-    private Table table; // don't access directly, call getTable()
+    private final CreateTableRequest tableDef;
+    //private Table table; // don't access directly, call getTable()
 
     public DynamoStore(DynamoStoreManager mgr, Configuration conf, String storeName) {
         manager = mgr;
-        this.conf = conf;
         this.storeName = storeName;
-        this.tableName = conf.get(DYNAMO_TABLE_BASE) + storeName;
+        this.tableName = conf.get(Utils.DYNAMO_TABLE_BASE) + storeName;
+        tableDef = new CreateTableRequest()
+            .withTableName(tableName)
+            .withKeySchema(
+                new KeySchemaElement(PARTITION_KEY, KeyType.HASH),
+                new KeySchemaElement(SORT_KEY, KeyType.RANGE))
+            .withAttributeDefinitions(
+                new AttributeDefinition(PARTITION_KEY, ScalarAttributeType.B),
+                new AttributeDefinition(SORT_KEY, ScalarAttributeType.B))
+            .withProvisionedThroughput(new ProvisionedThroughput(conf.get(Utils.DYNAMO_READ_THROUGHPUT), conf.get(Utils.DYNAMO_WRITE_THROUGHPUT)));
     }
 
     @Override
     public EntryList getSlice(KeySliceQuery query, StoreTransaction txh) throws BackendException {
-        try {
+        try (DynamoTable table = manager.tableMgr.getTable(tableName, tableDef)){
             // The query spec doesn't allow more than one operation on a range key, thus I can't pass a filter like
             // range key >= begin and range key < end, which is what I need since JG queries are inclusive of the
             // slice start but exclusive of the slice end.  So, I use between to get inclusive on the sort key on
@@ -121,7 +112,7 @@ public class DynamoStore implements KeyColumnValueStore {
                     " beginning slice at " + query.getSliceStart().toString() + " and ending slice at " +
                     query.getSliceEnd().toString());
             }
-            ItemCollection<QueryOutcome> results = getTable().query(querySpec);
+            ItemCollection<QueryOutcome> results = table.get().query(querySpec);
             return StaticArrayEntryList.ofBytes(applyLimit(pruneOutEndKey(results, sliceEnd), query), dynamoEntryGetter);
         } catch (Exception e) {
             LOG.error("Failed to run query", e);
@@ -130,7 +121,7 @@ public class DynamoStore implements KeyColumnValueStore {
     }
 
     @Override
-    public Map<StaticBuffer, EntryList> getSlice(List<StaticBuffer> keys, SliceQuery query, StoreTransaction txh) throws BackendException {
+    public Map<StaticBuffer, EntryList> getSlice(List<StaticBuffer> keys, SliceQuery query, StoreTransaction txh) {
         throw new UnsupportedOperationException();
     }
 
@@ -144,13 +135,13 @@ public class DynamoStore implements KeyColumnValueStore {
     }
 
     @Override
-    public void acquireLock(StaticBuffer key, StaticBuffer column, StaticBuffer expectedValue, StoreTransaction txh) throws BackendException {
+    public void acquireLock(StaticBuffer key, StaticBuffer column, StaticBuffer expectedValue, StoreTransaction txh) {
         throw new UnsupportedOperationException();
 
     }
 
     @Override
-    public KeyIterator getKeys(KeyRangeQuery query, StoreTransaction txh) throws BackendException {
+    public KeyIterator getKeys(KeyRangeQuery query, StoreTransaction txh) {
         throw new UnsupportedOperationException();
     }
 
@@ -159,13 +150,13 @@ public class DynamoStore implements KeyColumnValueStore {
         // This method is painful because it does a full scan and has to fetch back all the results before
         // it can return the iterator to the caller.  If this is called frequently we might want to create
         // a secondary table that maps janus columns to janus keys so we can do this efficiently.
-        try {
+        try (DynamoTable table = manager.tableMgr.getTable(tableName, tableDef)){
             byte[] sliceEnd = query.getSliceEnd().as(unsignedBytesFactory);
             ScanSpec scanSpec = new ScanSpec()
                 .withScanFilters(new ScanFilter(SORT_KEY).between(query.getSliceStart().as(unsignedBytesFactory),
                     sliceEnd));
 
-            ItemCollection<ScanOutcome> results = getTable().scan(scanSpec);
+            ItemCollection<ScanOutcome> results = table.get().scan(scanSpec);
             // We wrap the partition key in a ByteBuffer before sticking it in the map because ByteBuffers return
             // reasonable equals() and hashCode() values for use in hashing.
             final Map<ByteBuffer, List<Item>> byKey = new HashMap<>();
@@ -191,7 +182,7 @@ public class DynamoStore implements KeyColumnValueStore {
                         // The HBase implementation closes the outer iterator if the inner iterator is closed, but
                         // that doesn't seem like it can be right.
                         @Override
-                        public void close() throws IOException {
+                        public void close() {
                             innerClosed = true;
                         }
 
@@ -210,7 +201,7 @@ public class DynamoStore implements KeyColumnValueStore {
                 }
 
                 @Override
-                public void close() throws IOException {
+                public void close() {
                     closed = true;
                 }
 
@@ -241,9 +232,7 @@ public class DynamoStore implements KeyColumnValueStore {
     }
 
     @Override
-    public void close() throws BackendException {
-        manager.getDynamo().shutdown();
-        table = null;
+    public void close() {
     }
 
     String getTableName() {
@@ -254,45 +243,21 @@ public class DynamoStore implements KeyColumnValueStore {
      * Drop the data in this store.
      */
     void drop() {
-        try {
-            getTable().delete();
+        try (DynamoTable table = manager.tableMgr.getTable(tableName, tableDef)) {
+            table.get().delete();
         } catch (Exception e) {
             LOG.error("Failed to drop table: " + e.getMessage(), e);
         }
     }
 
-    Table getTable() throws BackendException {
-        if (table == null) {
-            // So when you call DynamoDB.getTable() it doesn't actually get the table.  It just gives you a handle
-            // based on the table name.  So you can't use it to tell whether the table exists.  Instead, you have
-            // to get a listing of the existing tables and look for your table name.  Who writes APIs like this?
-            TableCollection<ListTablesResult> existingTables =
-                manager.getDynamo().listTables(conf.get(DYNAMO_TABLE_BASE));
-            for (Table maybe : existingTables) {
-                if (maybe.getTableName().equals(tableName)) {
-                    table = maybe;
-                    break;
-                }
-            }
-            // We didn't find it in the list, so we need to create it.
-            if (table == null) {
-                LOG.info("Unable to find table " + tableName + ", will create it");
-                table = manager.getDynamo().createTable(tableName,
-                    Arrays.asList(
-                        new KeySchemaElement(PARTITION_KEY, KeyType.HASH),
-                        new KeySchemaElement(SORT_KEY, KeyType.RANGE)
-                    ), Arrays.asList(
-                        new AttributeDefinition(PARTITION_KEY, ScalarAttributeType.B),
-                        new AttributeDefinition(SORT_KEY, ScalarAttributeType.B)
-                    ), new ProvisionedThroughput(conf.get(DYNAMO_READ_THROUGHPUT), conf.get(DYNAMO_WRITE_THROUGHPUT)));
-                try {
-                    table.waitForActive();
-                } catch (InterruptedException e) {
-                    throw new TemporaryBackendException("Interupted waiting for table to be active", e);
-                }
-            }
+    /**
+     * Make sure a table exists so that data can be inserted into it.
+     * @throws BackendException if we fail to connect to DynamoDB or to create the table
+     */
+    void makeSureTableExists() throws BackendException {
+        try (DynamoTable table = manager.tableMgr.getTable(tableName, tableDef)) {
+            LOG.debug("Table exists: " + table.get().getTableName());
         }
-        return table;
     }
 
     private final StaticArrayEntry.GetColVal<Item, byte[]> dynamoEntryGetter = new StaticArrayEntry.GetColVal<Item, byte[]>() {

@@ -16,12 +16,33 @@ package org.janusgraph.diskstorage.dynamo;
 
 import org.janusgraph.diskstorage.StaticBuffer;
 import org.janusgraph.diskstorage.configuration.ConfigNamespace;
+import org.janusgraph.diskstorage.configuration.ConfigOption;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 
 class Utils {
+    private static final String DEFAULT_DYNAMO_TABLE_BASE = DynamoStoreManager.NAME + "-";
+    // TODO - no idea if these are reasonable values or not
+    private static final long DEFAULT_READ_THROUGHPUT = 10L;
+    private static final long DEFAULT_WRITE_THROUGHPUT = 10L;
+    private static final int DEFAULT_MAX_CONNECTIONS = 10;
+
     public static final ConfigNamespace DYNAMO_NS =
         new ConfigNamespace(GraphDatabaseConfiguration.STORAGE_NS, "dynamo",
         "DynamoDB backend storage configuration options");
+    public static final ConfigOption<Long> DYNAMO_WRITE_THROUGHPUT = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-write-throughput", "Dynamo write capacity throughput", ConfigOption.Type.LOCAL, DEFAULT_WRITE_THROUGHPUT);
+    public static final ConfigOption<Long> DYNAMO_READ_THROUGHPUT = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-read-throughput", "Dynamo read capacity throughput", ConfigOption.Type.LOCAL, DEFAULT_READ_THROUGHPUT);
+    public static final ConfigOption<String> DYNAMO_TABLE_BASE = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-table-base", "Basename for tables to be created in dynamoDB", ConfigOption.Type.FIXED, // TODO not sure if this should be FIXED or LOCAL
+        DEFAULT_DYNAMO_TABLE_BASE);
+    public static final ConfigOption<String> DYNAMO_URL = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-url", "URL to connect to DynamoDB", ConfigOption.Type.LOCAL, String.class);
+    public static final ConfigOption<String> DYNAMO_REGION = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-region", "AWS region to access", ConfigOption.Type.LOCAL, String.class);
+    public static final ConfigOption<Integer> DYNAMO_MAX_CONNECTIONS = new ConfigOption<>(DYNAMO_NS,
+        "dynamo-max-connections", "Maximum concurrent connections to DynamoDB", ConfigOption.Type.LOCAL,
+        DEFAULT_MAX_CONNECTIONS);
 
 
     /**

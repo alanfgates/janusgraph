@@ -14,29 +14,22 @@
 
 package org.janusgraph.diskstorage.dynamo;
 
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
-import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
-import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.Table;
-import com.amazonaws.services.dynamodbv2.document.TableCollection;
 import com.amazonaws.services.dynamodbv2.document.spec.BatchWriteItemSpec;
 import com.amazonaws.services.dynamodbv2.document.spec.ScanSpec;
 import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
+import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
 import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
 import com.amazonaws.services.dynamodbv2.model.KeyType;
-import com.amazonaws.services.dynamodbv2.model.ListTablesResult;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
-import com.google.common.base.Preconditions;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
 import org.janusgraph.diskstorage.StaticBuffer;
 import org.janusgraph.diskstorage.StoreMetaData;
 import org.janusgraph.diskstorage.TemporaryBackendException;
 import org.janusgraph.diskstorage.common.AbstractStoreManager;
-import org.janusgraph.diskstorage.configuration.ConfigOption;
 import org.janusgraph.diskstorage.configuration.Configuration;
 import org.janusgraph.diskstorage.keycolumnvalue.KCVMutation;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStore;
@@ -53,9 +46,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_READ_THROUGHPUT;
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_TABLE_BASE;
-import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_WRITE_THROUGHPUT;
+import static org.janusgraph.diskstorage.dynamo.Utils.DYNAMO_READ_THROUGHPUT;
+import static org.janusgraph.diskstorage.dynamo.Utils.DYNAMO_TABLE_BASE;
+import static org.janusgraph.diskstorage.dynamo.Utils.DYNAMO_WRITE_THROUGHPUT;
 
 /**
  * StoreManager that stores data in Amazon's DynamoDB.  All of the data is stored in a table per store.  The name
@@ -80,23 +73,29 @@ import static org.janusgraph.diskstorage.dynamo.DynamoStore.DYNAMO_WRITE_THROUGH
 public class DynamoStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
 
     static final String NAME = "janusgraph";
-    public static final ConfigOption<String> DYNAMO_REGION = new ConfigOption<>(Utils.DYNAMO_NS,
-        "dynamo-region", "AWS region to access", ConfigOption.Type.LOCAL, String.class);
-    public static final ConfigOption<String> DYNAMO_URL = new ConfigOption<>(Utils.DYNAMO_NS,
-        "dynamo-url", "URL to connect to DynamoDB", ConfigOption.Type.LOCAL, String.class);
 
     private static final String STORES_TABLE_NAME = "storestable";
     private static final String STORES_TABLE_PART_KEY = "name";
     private static final Logger LOG = LoggerFactory.getLogger(DynamoStoreManager.class);
 
+    final DynamoTableManager tableMgr;
     private final Map<String, DynamoStore> stores; // Don't access directly, use getStore()
-    private DynamoDB dynamo; // connection to dynamo, don't access directly, call getDynamo()
-    private Table storesTable; // handle for the table that store names of tables we are using in Dynamo.  Don't access direclty, call getStoresTable()
+    //private DynamoDB dynamo; // connection to dynamo, don't access directly, call getDynamo()
+    private final ConnectionPool pool;
+    private final String storesTableName;
+    private final CreateTableRequest storesTableDef;
 
     public DynamoStoreManager(Configuration conf) {
         super(conf);
-
+        pool = new ConnectionPool(conf);
+        tableMgr = new DynamoTableManager(conf, pool);
         stores = new HashMap<>();
+        storesTableName = storageConfig.get(DYNAMO_TABLE_BASE) + STORES_TABLE_NAME;
+        storesTableDef = new CreateTableRequest()
+            .withTableName(storesTableName)
+            .withKeySchema(Collections.singletonList(new KeySchemaElement(STORES_TABLE_PART_KEY, KeyType.HASH)))
+            .withAttributeDefinitions(Collections.singletonList(new AttributeDefinition(STORES_TABLE_PART_KEY, ScalarAttributeType.S)))
+            .withProvisionedThroughput(new ProvisionedThroughput(storageConfig.get(DYNAMO_READ_THROUGHPUT), storageConfig.get(DYNAMO_WRITE_THROUGHPUT)));
     }
 
     @Override
@@ -109,16 +108,13 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         MutationCollector collector = new MutationCollector();
         for (Map.Entry<String, Map<StaticBuffer, KCVMutation>> topEntry : mutations.entrySet()) {
             DynamoStore store = getStore(topEntry.getKey());
-            // Table creation in the stores is lazy, as is store creation.  If the preceding line created a store,
-            // then we need to make sure that the table gets created.  Otherwise the subsequent bulk operations will
-            // fail.
-            store.getTable();
-            String tableName = store.getTableName();
-            collector.addMutationsForOneTable(tableName, topEntry.getValue());
+            // Table creation in the stores is lazy, this may be the first time data has been inserted into the table.
+            store.makeSureTableExists();
+            collector.addMutationsForOneTable(store.getTableName(), topEntry.getValue());
         }
-        try {
+        try (DynamoConnection dynamo = pool.getConnection()) {
             for (BatchWriteItemSpec batchSpec : collector) {
-                getDynamo().batchWriteItem(batchSpec);
+                dynamo.get().batchWriteItem(batchSpec);
             }
         } catch (Exception e) {
             LOG.error("Failed to write batch items", e);
@@ -134,22 +130,19 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     @Override
     public void close() throws BackendException {
         clearStores();
-        if (dynamo != null) dynamo.shutdown();
-        dynamo = null;
-        storesTable = null;
-
+        pool.closeAll();
     }
 
     @Override
     public void clearStorage() throws BackendException {
-        try {
+        try (DynamoTable storesTable = tableMgr.getTable(storesTableName, storesTableDef)) {
             for (Item storeInfo : getAllStores()) {
                 // Go around getStore() here, because it does a bunch of stuff we don't need
                 String storeName = storeInfo.getString(STORES_TABLE_PART_KEY);
                 DynamoStore store = stores.get(storeName);
                 if (store == null) store = new DynamoStore(this, storageConfig, storeName);
                 store.drop();
-                getStoresTable().deleteItem(STORES_TABLE_PART_KEY, storeName);
+                storesTable.get().deleteItem(STORES_TABLE_PART_KEY, storeName);
             }
             clearStores();
         } catch (Exception e) {
@@ -186,25 +179,6 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         // There's no notion of local in Dynamo, so we don't support this
     }
 
-    DynamoDB getDynamo() {
-        if (dynamo == null) {
-            Preconditions.checkArgument(storageConfig.has(DYNAMO_URL) && storageConfig.has(DYNAMO_REGION));
-
-            // TODO - following taken from example DynamoDB code, probably way more that needs
-            // done here, like user credentials, security tokens, etc.
-            LOG.info("Connecting to DynamoDB at endpoint " + storageConfig.get(DYNAMO_URL) + " and region " +
-                storageConfig.get(DYNAMO_REGION));
-            AmazonDynamoDB client = AmazonDynamoDBClientBuilder
-                .standard()
-                .withEndpointConfiguration(
-                    new AwsClientBuilder.EndpointConfiguration(storageConfig.get(DYNAMO_URL), storageConfig.get(DYNAMO_REGION))
-                )
-                .build();
-            dynamo = new DynamoDB(client);
-        }
-        return dynamo;
-    }
-
     private DynamoStore getStore(String storeName) throws BackendException {
         DynamoStore store = stores.get(storeName);
         if (store == null) {
@@ -222,11 +196,11 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
 
     private DynamoStore addStore(String storeName) throws BackendException {
         // See if the store exists, if not, add it
-        try {
-            Item item = getStoresTable().getItem(STORES_TABLE_PART_KEY, storeName);
+        try (DynamoTable storesTable = tableMgr.getTable(storesTableName, storesTableDef)) {
+            Item item = storesTable.get().getItem(STORES_TABLE_PART_KEY, storeName);
             if (item == null) {
                 // This store doesn't exist yet, so we need to record it
-                getStoresTable().putItem(new Item().withPrimaryKey(STORES_TABLE_PART_KEY, storeName));
+                storesTable.get().putItem(new Item().withPrimaryKey(STORES_TABLE_PART_KEY, storeName));
             }
             return new DynamoStore(this, storageConfig, storeName);
         } catch (Exception e) {
@@ -235,37 +209,16 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         }
     }
 
+    /*
     private Table getStoresTable() throws BackendException {
-        if (storesTable == null) {
-            String tableName = storageConfig.get(DYNAMO_TABLE_BASE) + STORES_TABLE_NAME;
-            TableCollection<ListTablesResult> existingTables = getDynamo().listTables(storageConfig.get(DYNAMO_TABLE_BASE));
-            for (Table maybe : existingTables) {
-                if (maybe.getTableName().equals(tableName)) {
-                    storesTable = maybe;
-                    break;
-                }
-            }
-            // We didn't find it in the list, so we need to create it.
-            if (storesTable == null) {
-                LOG.info("Unable to find table " + tableName + ", will create it");
-                storesTable = getDynamo().createTable(tableName,
-                    Collections.singletonList(new KeySchemaElement(STORES_TABLE_PART_KEY, KeyType.HASH)),
-                    Collections.singletonList(new AttributeDefinition(STORES_TABLE_PART_KEY, ScalarAttributeType.S)),
-                    new ProvisionedThroughput(storageConfig.get(DYNAMO_READ_THROUGHPUT), storageConfig.get(DYNAMO_WRITE_THROUGHPUT)));
-                try {
-                    storesTable.waitForActive();
-                } catch (InterruptedException e) {
-                    throw new TemporaryBackendException("Interupted waiting for table to be active", e);
-                }
-            }
-        }
-        return storesTable;
+        return tableMgr.getTable(storesTableName, storesTableDef);
     }
+    */
 
     // This returns a list of all of the stores that have been created, not just the ones cached in this instance.
     private Iterable<Item> getAllStores() throws BackendException {
-        try {
-            return getStoresTable().scan(new ScanSpec());
+        try (DynamoTable storesTable = tableMgr.getTable(storesTableName, storesTableDef)) {
+            return storesTable.get().scan(new ScanSpec());
         } catch (Exception e) {
             LOG.error("Failed to scan storesTable to find all existing stores");
             throw new TemporaryBackendException("Failed to scan storesTable to find all existing stores", e);
