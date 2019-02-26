@@ -40,7 +40,7 @@ class ConnectionPool {
      */
     ConnectionPool(Configuration conf) {
         this.conf = conf;
-        maxConnections = conf.get(Utils.DYNAMO_MAX_CONNECTIONS);
+        maxConnections = conf.get(ConfigConstants.DYNAMO_MAX_CONNECTIONS);
         readyToUse = new ArrayDeque<>(maxConnections);
         inUse = new HashSet<>(maxConnections);
         connectionsCreated = 0;

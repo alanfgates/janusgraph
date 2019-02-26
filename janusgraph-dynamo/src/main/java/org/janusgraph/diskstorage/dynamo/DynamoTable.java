@@ -1,9 +1,27 @@
+// Copyright 2019 JanusGraph Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
 import com.amazonaws.services.dynamodbv2.document.Table;
 import com.amazonaws.services.dynamodbv2.document.TableCollection;
+import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
 import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
 import com.amazonaws.services.dynamodbv2.model.ListTablesResult;
+import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
+import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.TemporaryBackendException;
 import org.janusgraph.diskstorage.configuration.Configuration;
@@ -12,6 +30,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.DYNAMO_TABLE_NAME;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.PARTITION_KEY;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.SORT_KEY;
+
 /**
  * A reference to a DynamoTable.  Wrapped to handle closing the dynamo connection in the table and returning
  * it to the connection pool.
@@ -19,50 +41,40 @@ import java.io.Closeable;
 class DynamoTable implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(DynamoTable.class);
 
+    private static boolean knownToExist = false;
+
     private final DynamoConnection dynamo;
     private final Table table;
 
-    /**
-     * This should only be called by {@link DynamoTableManager}.  Use this constructor when the table is already
-     * known to exist.
-     * @param pool connection pool
-     * @param tableName name of the table
-     * @throws BackendException if we cannot get a connection to Dynamo
-     */
-    DynamoTable(ConnectionPool pool, String tableName) throws BackendException {
-        // We intentionally don't close this connection because we're using it with the table.  Closing the table
-        // will close the connection.
-        dynamo = pool.getConnection();
-        table = dynamo.get().getTable(tableName);
-    }
-
-    /**
-     * This should only be called by {@link DynamoTableManager}.  Use this constructor when you don't know if the
-     * table exists.
-     * @param pool connection pool
-     * @param conf configuration object
-     * @param tableDef definition of the table
-     * @throws BackendException if the table can't be created or we cannot get a connection to Dynamo
-     */
-    DynamoTable(ConnectionPool pool, Configuration conf, CreateTableRequest tableDef) throws BackendException {
-        // We intentionally don't close this connection because we're using it with the table.  Closing the table
-        // will close the connection.
-        dynamo = pool.getConnection();
-        TableCollection<ListTablesResult> existingTables =
-            dynamo.get().listTables(conf.get(Utils.DYNAMO_TABLE_BASE));
-        for (Table maybe : existingTables) {
-            if (maybe.getTableName().equals(tableDef.getTableName())) {
-                table = maybe;
-                return;
+    DynamoTable(ConnectionPool pool, Configuration conf) throws BackendException {
+        dynamo = pool.getConnection(); // Don't auto close this, we'll close it when this table connection is closed
+        if (exists(pool, conf)) {
+            table = dynamo.get().getTable(conf.get(DYNAMO_TABLE_NAME));
+        } else {
+            synchronized (DynamoTable.class) {
+                // Somebody else might have jumped in and created it while we waited
+                if (!knownToExist) {
+                    CreateTableRequest tableDef = new CreateTableRequest()
+                        .withTableName(conf.get(DYNAMO_TABLE_NAME))
+                        .withKeySchema(
+                            new KeySchemaElement(PARTITION_KEY, KeyType.HASH),
+                            new KeySchemaElement(SORT_KEY, KeyType.RANGE))
+                        .withAttributeDefinitions(
+                            new AttributeDefinition(PARTITION_KEY, ScalarAttributeType.S),
+                            new AttributeDefinition(SORT_KEY, ScalarAttributeType.S))
+                        .withProvisionedThroughput(new ProvisionedThroughput(conf.get(ConfigConstants.DYNAMO_READ_THROUGHPUT), conf.get(ConfigConstants.DYNAMO_WRITE_THROUGHPUT)));
+                    LOG.info("Unable to find table " + tableDef.getTableName() + ", will create it");
+                    try {
+                        table = dynamo.get().createTable(tableDef);
+                        table.waitForActive();
+                    } catch (Exception e) {
+                        throw new TemporaryBackendException("Unable to create table", e);
+                    }
+                    knownToExist = true;
+                } else {
+                    table = dynamo.get().getTable(conf.get(DYNAMO_TABLE_NAME));
+                }
             }
-        }
-        // We didn't find it in the list, so we need to create it.
-        LOG.info("Unable to find table " + tableDef.getTableName() + ", will create it");
-        try {
-            table = dynamo.get().createTable(tableDef);
-            table.waitForActive();
-        } catch (Exception e) {
-            throw new TemporaryBackendException("Unable to create table", e);
         }
     }
 
@@ -74,5 +86,39 @@ class DynamoTable implements Closeable {
     @Override
     public void close() {
         dynamo.close();
+    }
+
+    /**
+     * Check to see if the table exists, without creating it if it does not.
+     * @param pool connection pool
+     * @param conf configuration object
+     * @return true if the table already exists
+     * @throws BackendException if we don't know if the table exists and we can't connect to Dynamo
+     * to figure it out
+     */
+    static boolean exists(ConnectionPool pool, Configuration conf) throws BackendException {
+        if (!knownToExist) {
+            try (DynamoConnection dynamo = pool.getConnection()) {
+                TableCollection<ListTablesResult> existingTables = dynamo.get().listTables();
+                for (Table maybe : existingTables) {
+                    if (maybe.getTableName().equals(conf.get(DYNAMO_TABLE_NAME))) {
+                        knownToExist = true;
+                    }
+                }
+            }
+        }
+        return knownToExist;
+    }
+
+    static void drop(ConnectionPool pool, Configuration conf) throws BackendException {
+        if (exists(pool, conf)) {
+            try (DynamoTable table = new DynamoTable(pool, conf)) {
+                table.get().delete();
+                knownToExist = false;
+            } catch (Exception e) {
+                LOG.error("Failed to drop table: " + e.getMessage(), e);
+                throw new TemporaryBackendException("Failed to drop table", e);
+            }
+        }
     }
 }

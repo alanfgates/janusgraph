@@ -40,11 +40,11 @@ class TestUtils {
     static ModifiableConfiguration getConfig() {
         ModifiableConfiguration config = GraphDatabaseConfiguration.buildGraphConfiguration();
         config.set(GraphDatabaseConfiguration.STORAGE_BACKEND, "dynamo");
-        config.set(Utils.DYNAMO_REGION, "us-west-2");
+        config.set(ConfigConstants.DYNAMO_REGION, "us-west-2");
         // This sets it to use a local docker instance of Dynamo rather than Amazon's actual service
-        config.set(Utils.DYNAMO_URL, "http://localhost:8000");
+        config.set(ConfigConstants.DYNAMO_URL, "http://localhost:8000");
         // Set the number of concurrent connections high because the concurrency tests run 64 simultaneous threads
-        config.set(Utils.DYNAMO_MAX_CONNECTIONS, 64);
+        config.set(ConfigConstants.DYNAMO_MAX_CONNECTIONS, 64);
         return config;
     }
 
