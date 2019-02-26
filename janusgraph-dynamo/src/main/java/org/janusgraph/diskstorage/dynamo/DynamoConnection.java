@@ -24,8 +24,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 
-import static org.janusgraph.diskstorage.dynamo.Utils.DYNAMO_REGION;
-import static org.janusgraph.diskstorage.dynamo.Utils.DYNAMO_URL;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.DYNAMO_REGION;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.DYNAMO_URL;
 
 class DynamoConnection implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(DynamoConnection.class);

@@ -13,14 +13,18 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
-import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
-import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
+import org.janusgraph.diskstorage.BackendException;
+import org.janusgraph.diskstorage.configuration.ModifiableConfiguration;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Test;
 
 import java.io.IOException;
 
-public class DynamoStoreTest extends KeyColumnValueStoreTest {
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.DYNAMO_TABLE_NAME;
+
+public class DynamoTableTest {
 
     private static String containerName;
 
@@ -35,8 +39,15 @@ public class DynamoStoreTest extends KeyColumnValueStoreTest {
         TestUtils.shutdownDockerDynamo(containerName);
     }
 
-    @Override
-    public KeyColumnValueStoreManager openStorageManager() {
-        return new DynamoStoreManager(TestUtils.getConfig());
+    @Test
+    public void existenceCreationAndDrop() throws BackendException {
+        ModifiableConfiguration conf = TestUtils.getConfig();
+        conf.set(DYNAMO_TABLE_NAME, "dtt");
+        ConnectionPool pool = new ConnectionPool(conf);
+        Assert.assertFalse(DynamoTable.exists(pool, conf));
+        DynamoTable table = new DynamoTable(pool, conf);
+        Assert.assertTrue(DynamoTable.exists(pool, conf));
+        DynamoTable.drop(pool, conf);
+        Assert.assertFalse(DynamoTable.exists(pool, conf));
     }
 }
