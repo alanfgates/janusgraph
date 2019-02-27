@@ -40,6 +40,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -47,10 +48,13 @@ import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
 
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.EMPTY_BYTE_ARRAY;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.NULL_BYTE_ARRAY_VALUE;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrMinusOneFactory;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.logBytes;
 import static org.janusgraph.diskstorage.dynamo.ConfigConstants.PARTITION_KEY;
 import static org.janusgraph.diskstorage.dynamo.ConfigConstants.SORT_KEY;
 import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrFactory;
-import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrPlusOneFactory;
 import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.strToBytes;
 
 public class DynamoStore implements KeyColumnValueStore {
@@ -93,13 +97,25 @@ public class DynamoStore implements KeyColumnValueStore {
             List<AttributeUpdate> updates = new ArrayList<>();
             for (StaticBuffer colToDrop : deletions) {
                 updates.add(new AttributeUpdate(colToDrop.as(bytesToStrFactory)).delete());
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("Added delete for column " + colToDrop.as(bytesToStrFactory));
+                }
             }
             for (Entry addition : additions) {
-                updates.add(new AttributeUpdate(addition.getColumn().as(bytesToStrFactory)).put(addition.getValue().as(StaticBuffer.ARRAY_FACTORY)));
+                byte[] val = addition.getValue().as(StaticBuffer.ARRAY_FACTORY);
+                if (val == null || val.length == 0) {
+                    val = NULL_BYTE_ARRAY_VALUE;
+                }
+                updates.add(new AttributeUpdate(addition.getColumn().as(bytesToStrFactory)).put(val));
+                if (LOG.isTraceEnabled()) {
+                    logBytes("Added insert for column " + addition.getColumn().as(bytesToStrFactory) + " with value ",
+                        addition.getValue().as(StaticBuffer.ARRAY_FACTORY));
+                }
             }
             UpdateItemSpec update = new UpdateItemSpec()
                 .withPrimaryKey(PARTITION_KEY, storeName, SORT_KEY, key.as(bytesToStrFactory))
                 .withAttributeUpdate(updates);
+            if (LOG.isDebugEnabled()) LOG.debug("Doing update on key " + key.as(bytesToStrFactory));
             table.get().updateItem(update);
         } catch (Exception e) {
             LOG.error("Failed to run update for key " + key.as(bytesToStrFactory), e);
@@ -134,7 +150,7 @@ public class DynamoStore implements KeyColumnValueStore {
     }
 
     private KeyIterator doScan(SliceQuery sliceQuery, StaticBuffer keyStart, StaticBuffer keyEnd) throws BackendException {
-        String end = keyEnd == null ? null : keyEnd.as(bytesToStrPlusOneFactory);
+        String end = keyEnd == null ? null : keyEnd.as(bytesToStrMinusOneFactory);
         try (DynamoTable table = getTable()) {
             QuerySpec querySpec = new QuerySpec()
                 .withHashKey(PARTITION_KEY, storeName);
@@ -194,11 +210,9 @@ public class DynamoStore implements KeyColumnValueStore {
                 public boolean hasNext() {
                     if (closed) throw new IllegalStateException("Attempt to call hasNext on closed iterator");
                     while (resultsIter.hasNext()) {
-                        LOG.debug("Looking for next key from query");
                         currItem = resultsIter.next();
                         currSortedItem = sortFilterLimit(sliceQuery, currItem);
                         if (currSortedItem.size() > 0) {
-                            LOG.debug("Found a key with at least one value");
                             return true;
                         }
                     }
@@ -225,11 +239,11 @@ public class DynamoStore implements KeyColumnValueStore {
 
     private SortedMap<String, Object> sortFilterLimit(SliceQuery query, Item item) {
         Map<String, Object> unsortedMap = item.asMap();
-        LOG.debug("sortFilterLimit passed item with " + unsortedMap.size() + " values");
+        LOG.trace("sortFilterLimit passed item with " + unsortedMap.size() + " values");
         SortedMap<String, Object> sortedItem =
             new TreeMap<>(unsortedMap)
                 .subMap(query.getSliceStart().as(bytesToStrFactory), query.getSliceEnd().as(bytesToStrFactory));
-        LOG.debug("After filtering for slice query map has " + sortedItem.size() + " values");
+        LOG.trace("After filtering for slice query map has " + sortedItem.size() + " values");
         // If there's a limit, apply it
         if (query.hasLimit() && query.getLimit() < sortedItem.size()) {
             Iterator<Map.Entry<String, Object>> iter = sortedItem.entrySet().iterator();
@@ -239,7 +253,7 @@ public class DynamoStore implements KeyColumnValueStore {
                 lastKey = iter.next().getKey();
             }
             sortedItem = sortedItem.headMap(lastKey);
-            LOG.debug("After applying limit map has " + sortedItem.size() + " values");
+            LOG.trace("After applying limit map has " + sortedItem.size() + " values");
         }
         return sortedItem;
     }
@@ -256,7 +270,11 @@ public class DynamoStore implements KeyColumnValueStore {
 
         @Override
         public byte[] getValue(Map.Entry<String, Object> element) {
-            return (byte[])element.getValue();
+            byte[] b = (byte[])element.getValue();
+            if (Arrays.equals(NULL_BYTE_ARRAY_VALUE, b)) {
+                b = EMPTY_BYTE_ARRAY;
+            }
+            return b;
         }
 
         @Override
