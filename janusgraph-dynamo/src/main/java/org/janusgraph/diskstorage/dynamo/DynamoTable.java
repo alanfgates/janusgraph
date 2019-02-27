@@ -49,13 +49,13 @@ class DynamoTable implements Closeable {
     DynamoTable(ConnectionPool pool, Configuration conf) throws BackendException {
         dynamo = pool.getConnection(); // Don't auto close this, we'll close it when this table connection is closed
         if (exists(pool, conf)) {
-            table = dynamo.get().getTable(conf.get(DYNAMO_TABLE_NAME));
+            table = dynamo.get().getTable(getTableName(conf));
         } else {
             synchronized (DynamoTable.class) {
                 // Somebody else might have jumped in and created it while we waited
                 if (!knownToExist) {
                     CreateTableRequest tableDef = new CreateTableRequest()
-                        .withTableName(conf.get(DYNAMO_TABLE_NAME))
+                        .withTableName(getTableName(conf))
                         .withKeySchema(
                             new KeySchemaElement(PARTITION_KEY, KeyType.HASH),
                             new KeySchemaElement(SORT_KEY, KeyType.RANGE))
@@ -72,7 +72,7 @@ class DynamoTable implements Closeable {
                     }
                     knownToExist = true;
                 } else {
-                    table = dynamo.get().getTable(conf.get(DYNAMO_TABLE_NAME));
+                    table = dynamo.get().getTable(getTableName(conf));
                 }
             }
         }
@@ -101,7 +101,7 @@ class DynamoTable implements Closeable {
             try (DynamoConnection dynamo = pool.getConnection()) {
                 TableCollection<ListTablesResult> existingTables = dynamo.get().listTables();
                 for (Table maybe : existingTables) {
-                    if (maybe.getTableName().equals(conf.get(DYNAMO_TABLE_NAME))) {
+                    if (maybe.getTableName().equals(getTableName(conf))) {
                         knownToExist = true;
                     }
                 }
@@ -110,6 +110,12 @@ class DynamoTable implements Closeable {
         return knownToExist;
     }
 
+    /**
+     * Drop this table if it exists.
+     * @param pool connection pool
+     * @param conf configuration object
+     * @throws BackendException if we cannot connect to Dynamo or the drop fails.
+     */
     static void drop(ConnectionPool pool, Configuration conf) throws BackendException {
         if (exists(pool, conf)) {
             try (DynamoTable table = new DynamoTable(pool, conf)) {
@@ -120,5 +126,9 @@ class DynamoTable implements Closeable {
                 throw new TemporaryBackendException("Failed to drop table", e);
             }
         }
+    }
+
+    static String getTableName(Configuration conf) {
+        return conf.get(DYNAMO_TABLE_NAME);
     }
 }

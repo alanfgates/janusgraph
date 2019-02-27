@@ -13,17 +13,14 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
-import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
+import org.janusgraph.diskstorage.log.KCVSLogTest;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
-public class DynamoStoreTest extends KeyColumnValueStoreTest {
-    private static final Logger LOG = LoggerFactory.getLogger(DynamoStoreTest.class);
+public class DynamoLogTest extends KCVSLogTest {
 
     private static String containerName;
 

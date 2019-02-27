@@ -103,9 +103,7 @@ public class DynamoStore implements KeyColumnValueStore {
             }
             for (Entry addition : additions) {
                 byte[] val = addition.getValue().as(StaticBuffer.ARRAY_FACTORY);
-                if (val == null || val.length == 0) {
-                    val = NULL_BYTE_ARRAY_VALUE;
-                }
+                if (val == null || val.length == 0) val = NULL_BYTE_ARRAY_VALUE;
                 updates.add(new AttributeUpdate(addition.getColumn().as(bytesToStrFactory)).put(val));
                 if (LOG.isTraceEnabled()) {
                     logBytes("Added insert for column " + addition.getColumn().as(bytesToStrFactory) + " with value ",

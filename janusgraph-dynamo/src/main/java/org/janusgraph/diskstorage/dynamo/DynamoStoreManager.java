@@ -13,10 +13,16 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.dynamo;
 
+import com.amazonaws.services.dynamodbv2.document.BatchGetItemOutcome;
+import com.amazonaws.services.dynamodbv2.document.Item;
+import com.amazonaws.services.dynamodbv2.document.TableKeysAndAttributes;
+import com.amazonaws.services.dynamodbv2.document.TableWriteItems;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
+import org.janusgraph.diskstorage.Entry;
 import org.janusgraph.diskstorage.StaticBuffer;
 import org.janusgraph.diskstorage.StoreMetaData;
+import org.janusgraph.diskstorage.TemporaryBackendException;
 import org.janusgraph.diskstorage.common.AbstractStoreManager;
 import org.janusgraph.diskstorage.configuration.Configuration;
 import org.janusgraph.diskstorage.keycolumnvalue.KCVMutation;
@@ -29,11 +35,20 @@ import org.janusgraph.diskstorage.keycolumnvalue.StoreTransaction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.AbstractMap;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.NULL_BYTE_ARRAY_VALUE;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrFactory;
 import static org.janusgraph.diskstorage.dynamo.ConfigConstants.DYNAMO_TABLE_NAME;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.PARTITION_KEY;
+import static org.janusgraph.diskstorage.dynamo.ConfigConstants.SORT_KEY;
 
 /**
  * StoreManager that stores data in Amazon's DynamoDB.  All of the data is stored in a single table.  The JanusGraph
@@ -83,8 +98,78 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     }
 
     @Override
-    public void mutateMany(Map<String, Map<StaticBuffer, KCVMutation>> mutations, StoreTransaction txh) {
-        throw new UnsupportedOperationException();
+    public void mutateMany(Map<String, Map<StaticBuffer, KCVMutation>> mutations, StoreTransaction txh) throws BackendException {
+        LOG.debug("received mutateMany with " + mutations.size() + " different stores");
+        Deque<OneMutation> byKey = new ArrayDeque<>();
+        for (Map.Entry<String, Map<StaticBuffer, KCVMutation>> storeEntry : mutations.entrySet()) {
+            LOG.debug("mutate many for store " + storeEntry.getKey() + " with " + storeEntry.getValue().size() + " different keys");
+            for (Map.Entry<StaticBuffer, KCVMutation> keyEntry : storeEntry.getValue().entrySet()) {
+                byKey.add(new OneMutation(storeEntry.getKey(), keyEntry.getKey(), keyEntry.getValue()));
+            }
+        }
+        // If there is just one, call store.mutate() as we have to make two calls for every set of 25
+        // in here anyway
+        if (byKey.size() == 1) {
+            OneMutation oneMutation = byKey.pop();
+            DynamoStore store = getStore(oneMutation.storeName);
+            store.mutate(oneMutation.keyAsBuffer, oneMutation.mutations.getAdditions(),
+                oneMutation.mutations.getDeletions(), txh);
+        } else {
+            try (DynamoConnection conn = pool.getConnection()) {
+                // DynamoDB can only handle 25 mods in one call
+                while (byKey.size() > 1) {
+                    Map<Map.Entry<String, String>, OneMutation> batch = new HashMap<>(25);
+                    for (int i = 0; i < 25 && byKey.size() > 0; i++) {
+                        OneMutation one = byKey.pop();
+                        batch.put(new AbstractMap.SimpleEntry<>(one.storeName, one.key), one);
+                    }
+                    TableKeysAndAttributes keysToFetch = new TableKeysAndAttributes(DynamoTable.getTableName(storageConfig));
+                    for (OneMutation one : batch.values()) {
+                        keysToFetch.addHashAndRangePrimaryKey(PARTITION_KEY, one.storeName, SORT_KEY, one.key);
+                    }
+                    BatchGetItemOutcome fetchOutcome = conn.get().batchGetItem(keysToFetch);
+
+                    List<Item> itemsToUpdate = new ArrayList<>();
+                    // There may or may not be values for the fetched keys as this key could be new.  So first walk through
+                    // the items we got back and update them based on the mutations.  Then add the rest of the mutations
+                    // There should be at most one entry in the map because we only fetched from one table
+                    assert fetchOutcome.getTableItems().size() == 0 || fetchOutcome.getTableItems().size() == 1;
+                    for (Item fetchedItem : fetchOutcome.getTableItems().get(DynamoTable.getTableName(storageConfig))) {
+                        Map.Entry<String, String> key =
+                            new AbstractMap.SimpleEntry<>(fetchedItem.getString(PARTITION_KEY), fetchedItem.getString(SORT_KEY));
+                        OneMutation existing = batch.remove(key);
+                        assert existing != null;
+                        for (StaticBuffer colToDrop : existing.mutations.getDeletions()) {
+                            fetchedItem.removeAttribute(colToDrop.as(bytesToStrFactory));
+                        }
+                        for (Entry addition : existing.mutations.getAdditions()) {
+                            byte[] val = addition.getValue().as(StaticBuffer.ARRAY_FACTORY);
+                            if (val == null || val.length == 0) val = NULL_BYTE_ARRAY_VALUE;
+                            fetchedItem.withBinary(addition.getColumn().as(bytesToStrFactory), val);
+                        }
+                        itemsToUpdate.add(fetchedItem);
+                    }
+                    // There may be new entries left over that just need inserted
+                    for (Map.Entry<Map.Entry<String, String>, OneMutation> one : batch.entrySet()) {
+                        Item itemToInsert = new Item();
+                        itemToInsert.withString(PARTITION_KEY, one.getKey().getKey());
+                        itemToInsert.withString(SORT_KEY, one.getKey().getValue());
+                        for (Entry addition : one.getValue().mutations.getAdditions()) {
+                            byte[] val = addition.getValue().as(StaticBuffer.ARRAY_FACTORY);
+                            if (val == null || val.length == 0) val = NULL_BYTE_ARRAY_VALUE;
+                            itemToInsert.withBinary(addition.getColumn().as(bytesToStrFactory), val);
+                        }
+                        itemsToUpdate.add(itemToInsert);
+                    }
+                    TableWriteItems keysToUpdate =
+                        new TableWriteItems(DynamoTable.getTableName(storageConfig)).withItemsToPut(itemsToUpdate);
+                    conn.get().batchWriteItem(keysToUpdate);
+                }
+            } catch (Exception e) {
+                LOG.error("Failed to run batch update", e);
+                throw new TemporaryBackendException("Failed to run batch update", e);
+            }
+        }
     }
 
     @Override
@@ -113,6 +198,7 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
         return new StandardStoreFeatures.Builder()
             .unorderedScan(true)
             .orderedScan(true)
+            .batchMutation(true)
             .distributed(true)
             .persists(true)
             .supportsInterruption(true)
@@ -142,6 +228,20 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
     private void clearStores() {
         for (DynamoStore store : stores.values()) store.close();
         stores.clear();
+    }
+
+    private class OneMutation {
+        final String storeName;
+        final String key;
+        final StaticBuffer keyAsBuffer;
+        final KCVMutation mutations;
+
+        OneMutation(String storeName, StaticBuffer key, KCVMutation mutations) {
+            this.storeName = storeName;
+            this.keyAsBuffer = key;
+            this.key = key.as(bytesToStrFactory);
+            this.mutations = mutations;
+        }
     }
 
 }
