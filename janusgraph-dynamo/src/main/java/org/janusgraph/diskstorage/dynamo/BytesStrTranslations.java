@@ -15,12 +15,19 @@
 package org.janusgraph.diskstorage.dynamo;
 
 import org.janusgraph.diskstorage.StaticBuffer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class BytesStrTranslations {
+    private static final Logger LOG = LoggerFactory.getLogger(BytesStrTranslations.class);
 
-    static final String MIN_KEY_VAL = "00";
-    static final String MAX_KEY_VAL = "10000000000000000"; // 64 bit max value + 1
-
+    // Need something to be a null marker since I can't store a null value in a byte field and the AttributeUpdate
+    // class doesn't have a method to set an attribute null.  I can't use any value with < 64 bits as the column could
+    // legitimately be any of those values.  So you a 9 byte value.  Don't start it with 0 or 0xff as those are likely
+    // to be more common and I want the equality to fail as quickly as possible since I'll have to check every
+    // return value against this.
+    static final byte[] NULL_BYTE_ARRAY_VALUE = new byte[] {(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80),(byte)(0x80)};
+    static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
 
     /**
      * Produces a String double the length of the array from the StaticBuffer.  Each byte from the
@@ -32,7 +39,7 @@ class BytesStrTranslations {
      * Produces a String double the length of the array from the StaticBuffer with one added to the value of the
      * right most byte (with any carrying handled).
      */
-    static StaticBuffer.Factory<String> bytesToStrPlusOneFactory = BytesStrTranslations::bytesToStrPlus1;
+    static StaticBuffer.Factory<String> bytesToStrMinusOneFactory = BytesStrTranslations::bytesToStrMinus1;
 
     /**
      * Translate a byte array into a hexidecimal String.  Each byte will occupy two String characters.
@@ -46,10 +53,13 @@ class BytesStrTranslations {
     static String bytesToStr(byte[] bytes, int offset, int limit) {
         assert limit > offset;
 
+        if (LOG.isTraceEnabled()) {
+            logBytes("bytesToStr called with offset " + offset + " and limit " + limit, bytes);
+        }
         // Not at all sure this is the most efficient way to do this
         StringBuilder buf = new StringBuilder((limit - offset) * 2);
-        for (byte b : bytes) {
-            String s = Integer.toHexString(Byte.toUnsignedInt(b));
+        for (int i = offset; i < limit; i++) {
+            String s = Integer.toHexString(Byte.toUnsignedInt(bytes[i]));
             if (s.length() == 1) buf.append('0');
             buf.append(s);
         }
@@ -67,41 +77,44 @@ class BytesStrTranslations {
     }
 
     /**
-     * Add one to a byte array as we convert it to a string.  This is necessary because Dynamo only offers between
+     * Subtract one from a byte array as we convert it to a string.  This is necessary because Dynamo only offers between
      * (which is inclusive on both ends) and we need exclusive on the end key.
      * @param bytes input array
      * @param offset starting position to translate, inclusive
      * @param limit stopping position for the translation, exclusive
      * @return a String with value one higher than the passed in byte array
      */
-    static String bytesToStrPlus1(byte[] bytes, int offset, int limit) {
+    static String bytesToStrMinus1(byte[] bytes, int offset, int limit) {
         StringBuilder buf = new StringBuilder((limit - offset) * 2 + 1);
-        boolean needToCarry = true; // true the first time so that we add one
+        boolean needToBorrow = true; // true the first time so that we subtract one
         for (int i = limit - 1; i >= offset; i--) {
             int hex = Byte.toUnsignedInt(bytes[i]);
-            if (needToCarry) hex++;
-            if (hex > 0xff) {
-                hex = 0;
-                needToCarry = true;
+            if (needToBorrow) hex--;
+            if (hex < 0) {
+                hex = 0xff;
+                needToBorrow = true;
             } else {
-                needToCarry = false;
+                needToBorrow = false;
             }
             String s = Integer.toHexString(hex);
             buf.insert(0, s);
             if (s.length() == 1) buf.insert(0, '0');
         }
-        if (needToCarry) buf.insert(0, "01");
+        if (needToBorrow) {
+            // This should only happen if we're all zero all the way, in which case just return 0
+            return "00";
+        }
         return buf.toString();
     }
 
     /**
      * Add one to a byte array as we convert it to a string.  This is equivalent to
-     * {@link #bytesToStrPlus1(byte[], int, int)} (bytes, 0, bytes.len).
+     * {@link #bytesToStrMinus1(byte[], int, int)} (bytes, 0, bytes.len).
      * @param bytes input array
      * @return a String with value one higher than the passed in byte array
      */
-    static String bytesToStrPlus1(byte[] bytes) {
-        return bytesToStrPlus1(bytes, 0, bytes.length);
+    static String bytesToStrMinus1(byte[] bytes) {
+        return bytesToStrMinus1(bytes, 0, bytes.length);
     }
 
     /**
@@ -118,4 +131,11 @@ class BytesStrTranslations {
         }
         return signed;
     }
+
+    static void logBytes(String title, byte[] bytes) {
+        StringBuilder buf = new StringBuilder(title);
+        for (byte b : bytes) buf.append(' ').append(b);
+        LOG.debug(buf.toString());
+    }
+
 }

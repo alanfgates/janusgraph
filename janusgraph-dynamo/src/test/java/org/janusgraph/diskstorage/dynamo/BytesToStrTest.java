@@ -21,7 +21,8 @@ import org.slf4j.LoggerFactory;
 import java.util.Comparator;
 
 import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStr;
-import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrPlus1;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.bytesToStrMinus1;
+import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.logBytes;
 import static org.janusgraph.diskstorage.dynamo.BytesStrTranslations.strToBytes;
 
 public class BytesToStrTest {
@@ -157,27 +158,41 @@ public class BytesToStrTest {
     }
 
     @Test
-    public void basicPlus1() {
+    public void limitAndOffset() {
+        byte[] signed = new byte[]{(byte)0x1, (byte)0x2, (byte)0x3, (byte)0x4};
+
+        String unsigned = bytesToStr(signed, 1, 3);
+        Assert.assertEquals("0203", unsigned);
+    }
+
+    @Test
+    public void basicMinus1() {
         byte[] bytes = new byte[] {(byte)0x23, (byte)0x2};
-        Assert.assertEquals("2303", bytesToStrPlus1(bytes, 0, bytes.length));
+        Assert.assertEquals("2301", bytesToStrMinus1(bytes));
     }
 
     @Test
-    public void plus1Carry() {
-        byte[] bytes = new byte[] {(byte)0x23, (byte)0xff};
-        Assert.assertEquals("2400", bytesToStrPlus1(bytes, 0, bytes.length));
+    public void minus1Borrow() {
+        byte[] bytes = new byte[] {(byte)0x23, (byte)0x0};
+        Assert.assertEquals("22ff", bytesToStrMinus1(bytes));
     }
 
     @Test
-    public void plus1CarryAtEnd() {
-        byte[] bytes = new byte[] {(byte)0xff, (byte)0xff};
-        Assert.assertEquals("010000", bytesToStrPlus1(bytes, 0, bytes.length));
+    public void minus1Zero() {
+        byte[] bytes = new byte[] {(byte)0x0, (byte)0x0};
+        Assert.assertEquals("00", bytesToStrMinus1(bytes));
     }
 
     @Test
-    public void plus1CarryInMiddle() {
-        byte[] bytes = new byte[] {(byte)0x9b, (byte)0x29, (byte)0xff};
-        Assert.assertEquals("9b2a00", bytesToStrPlus1(bytes, 0, bytes.length));
+    public void minus1CarryInMiddle() {
+        byte[] bytes = new byte[] {(byte)0x9b, (byte)0x29, (byte)0x0};
+        Assert.assertEquals("9b28ff", bytesToStrMinus1(bytes));
+    }
+
+    @Test
+    public void minus1Offset() {
+        byte[] bytes = new byte[] {(byte)0x3e, (byte)0x9b, (byte)0x29, (byte)0x0};
+        Assert.assertEquals("9b28", bytesToStrMinus1(bytes, 1, 3));
     }
 
 
@@ -191,12 +206,6 @@ public class BytesToStrTest {
         if (o2.length > length) return -1;
         return 0;
     };
-
-    private void logBytes(String title, byte[] bytes) {
-        StringBuilder buf = new StringBuilder(title);
-        for (byte b : bytes) buf.append(' ').append(b);
-        LOG.debug(buf.toString());
-    }
 
 
 
