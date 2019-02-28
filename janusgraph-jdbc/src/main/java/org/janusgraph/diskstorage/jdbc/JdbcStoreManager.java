@@ -1,4 +1,4 @@
-// Copyright 2018 JanusGraph Authors
+// Copyright 2019 JanusGraph Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,7 +93,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
     private final DataSource connPool;
     // List of our transactions, so we know what to shutdown at close.  Kept in a
-    // ConcurrentHashMap only for hte synchronization.
+    // ConcurrentHashMap only for the synchronization.
     private final ConcurrentMap<Integer, JdbcStoreTx> txs;
     private final AtomicInteger nextTxId;
     private boolean closed = false;
@@ -123,9 +123,6 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
             String passwd = conf.get(JDBC_PASSWORD);
             int maxPoolSize = conf.get(JDBC_POOL_SIZE);
 
-            // Not sure if I need something like this.
-            //Properties properties = replacePrefix(
-            //DataSourceProvider.getPrefixedProperties(hdpConfig, HIKARI));
             Duration connectionTimeout = conf.get(JDBC_TIMEOUT);
             HikariConfig config = null;
             try {
@@ -137,7 +134,6 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
             config.setJdbcUrl(driverUrl);
             config.setUsername(user);
             config.setPassword(passwd);
-            //https://github.com/brettwooldridge/HikariCP
             config.setConnectionTimeout(connectionTimeout.toMillis());
             log.info("Setting up connection pool with JDBC address " + driverUrl + " and user " +
                     user);
@@ -156,15 +152,13 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
             throw new TemporaryBackendException("Unable to close JDBC connection", e);
         }
 
-        // TODO - Not sure all these are right, just copied from BerkeleyDb
+        // Not 100% sure these are complete
         features = new StandardStoreFeatures.Builder()
             .orderedScan(true)
-            .transactional(transactional)
+            .transactional(true)
             .keyConsistent(GraphDatabaseConfiguration.buildGraphConfiguration())
-            .locking(false)
             .keyOrdered(true)
-            .supportsInterruption(false)
-            .optimisticLocking(false)
+            .batchMutation(true)
             .build();
 
     }
@@ -173,9 +167,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     public StoreTransaction beginTransaction(BaseTransactionConfig config) throws BackendException {
         Preconditions.checkState(!closed);
         try {
-            JdbcStoreTx tx =
-                new JdbcStoreTx(config, getJdbcConn(), txs, nextTxId.incrementAndGet());
-            return tx;
+            return new JdbcStoreTx(config, getJdbcConn(), txs, nextTxId.incrementAndGet());
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to connect to database", e);
         }
@@ -192,39 +184,27 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     @Override
     public void clearStorage() throws BackendException {
         Preconditions.checkState(!closed);
+        // I'm not sure this is right
         if (!stores.isEmpty()) {
             throw new IllegalStateException("Cannot delete store, since database is open: " + stores.keySet().toString());
         }
 
         Set<String> allStores = findAllStoresInDatabase();
-        for (String store : allStores) {
-            try (Connection conn = getJdbcConn()) {
+        try (Connection conn = getJdbcConn()) {
+            for (String store : allStores) {
                 try (Statement stmt = conn.createStatement()) {
-                    String sql = "select " + STORES_NAME + " from " + STORES_TABLE;
+                    String sql = "drop table " + store;
                     log.debug("Going to execute " + sql);
-                    // Need to read out the results first, else the intermittent commits can
-                    // screw with the result set.
-                    List<String> stores = new ArrayList<>();
-                    ResultSet rs = stmt.executeQuery(sql);
-                    while (rs.next()) {
-                        stores.add(rs.getString(STORES_NAME));
-                    }
-
-                    for (String storeName : stores) {
-                        sql = "drop table " + storeName;
-                        log.debug("Going to execute " + sql);
-                        stmt.execute(sql);
-                        sql = "delete from " + STORES_TABLE + " where " + STORES_NAME + " = '" +
-                            storeName + "'";
-                        log.debug("Going to execute " + sql);
-                        stmt.execute(sql);
-                        // Commit after each drop to avoid overloading the WAL
-                        conn.commit();
-                    }
+                    stmt.execute(sql);
+                    sql = "delete from " + STORES_TABLE + " where " + STORES_NAME + " = '" + store + "'";
+                    log.debug("Going to execute " + sql);
+                    stmt.execute(sql);
+                    // Commit after each drop to avoid overloading the WAL
+                    conn.commit();
                 }
-            } catch (SQLException e) {
-                throw new TemporaryBackendException("Unable to connect to database or drop tables", e);
             }
+        } catch (SQLException e) {
+            throw new TemporaryBackendException("Unable to connect to database or drop tables", e);
         }
     }
 
@@ -248,7 +228,6 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
     @Override
     public List<KeyRange> getLocalKeyPartition() throws BackendException {
-        Preconditions.checkState(!closed);
         throw new UnsupportedOperationException();
     }
 
@@ -256,6 +235,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     public OrderedKeyValueStore openDatabase(String name) throws BackendException {
         Preconditions.checkState(!closed);
         Preconditions.checkNotNull(name);
+        // TODO either we should make JdbcKeyValueStore backend independent or make this return the proper backend
         return stores.computeIfAbsent(name.toLowerCase(),
             s -> new PostgresKeyValueStore(s, JdbcStoreManager.this));
     }
@@ -264,18 +244,14 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     public void mutateMany(Map<String, KVMutation> mutations, StoreTransaction txh) throws BackendException {
         Preconditions.checkState(!closed);
         for (Map.Entry<String,KVMutation> mutation : mutations.entrySet()) {
-            OrderedKeyValueStore store = openDatabase(mutation.getKey());
+            JdbcKeyValueStore store = (JdbcKeyValueStore)openDatabase(mutation.getKey());
             KVMutation mutationValue = mutation.getValue();
 
             if (mutationValue.hasAdditions()) {
-                for (KeyValueEntry entry : mutationValue.getAdditions()) {
-                    store.insert(entry.getKey(),entry.getValue(),txh);
-                }
+                store.insertMany(mutationValue.getAdditions(), txh);
             }
             if (mutationValue.hasDeletions()) {
-                for (StaticBuffer del : mutationValue.getDeletions()) {
-                    store.delete(del,txh);
-                }
+                store.deleteMany(mutationValue.getDeletions(), txh);
             }
         }
     }
@@ -297,7 +273,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
      * @return all existing stores or an empty set if there are no existing stores
      * @throws BackendException if the attempt to communicate with the database fails.
      */
-    Set<String> findAllStoresInDatabase() throws BackendException {
+    private Set<String> findAllStoresInDatabase() throws BackendException {
         Set<String> allStores = new HashSet<>();
 
         try (Connection conn = getJdbcConn()) {
@@ -311,8 +287,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
             }
 
         } catch (SQLException e) {
-            throw new TemporaryBackendException("Unable to connect to database or query system " +
-                "tables.");
+            throw new TemporaryBackendException("Unable to connect to database or query system tables.");
         }
 
         return allStores;

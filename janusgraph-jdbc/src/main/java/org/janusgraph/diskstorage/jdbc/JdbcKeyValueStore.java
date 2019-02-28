@@ -78,7 +78,7 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
         String sql = "delete from " + storeName + " where " + KEY_VALUE_TABLE_KEY + " = ?";
         log.debug("Going to execute " + sql + " with ? set to " + key.toString());
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql)) {
-            stmt.setBytes(1, key.getBytes(0, key.length()));
+            stmt.setBytes(1, key.as(StaticBuffer.ARRAY_FACTORY));
             stmt.execute();
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to delete record", e);
@@ -92,9 +92,9 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
                 " where " + KEY_VALUE_TABLE_KEY + " = ?";
         log.debug("Going to execute " + sql + " with ? set to " + key.toString());
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql)) {
-            stmt.setBytes(1, key.getBytes(0, key.length()));
+            stmt.setBytes(1, key.as(StaticBuffer.ARRAY_FACTORY));
             ResultSet rs = stmt.executeQuery();
-            return rs.next() ? new StaticArrayBuffer(rs.getBytes(KEY_VALUE_TABLE_VALUE)) : null;
+            return rs.next() ? StaticArrayBuffer.of(rs.getBytes(KEY_VALUE_TABLE_VALUE)) : null;
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to fetch record", e);
         }
@@ -106,7 +106,7 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
         String sql = "select 1 from " + storeName + " where " + KEY_VALUE_TABLE_KEY + " = ?";
         log.debug("Going to execute " + sql + " with ? set to " + key.toString());
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql)) {
-            stmt.setBytes(1, key.getBytes(0, key.length()));
+            stmt.setBytes(1, key.as(StaticBuffer.ARRAY_FACTORY));
             ResultSet rs = stmt.executeQuery();
             return rs.next();
         } catch (SQLException e) {
@@ -118,6 +118,7 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
     public void acquireLock(StaticBuffer key, StaticBuffer expectedValue,
                             StoreTransaction txh) throws BackendException {
         // We don't lock
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -144,8 +145,8 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
         log.debug("Going to execute " + sql + " with ?, ? set to <" + key.toString() + ">, <" +
             value.toString() + ">");
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql)) {
-            stmt.setBytes(1, key.getBytes(0, key.length()));
-            stmt.setBytes(2, value.getBytes(0, value.length()));
+            stmt.setBytes(1, key.as(StaticBuffer.ARRAY_FACTORY));
+            stmt.setBytes(2, value.as(StaticBuffer.ARRAY_FACTORY));
             stmt.execute();
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to insert record", e);
@@ -158,27 +159,33 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
         List<KeyValueEntry> result = new ArrayList<>();
         String sql = "select " + KEY_VALUE_TABLE_KEY + ", " + KEY_VALUE_TABLE_VALUE +
                 " from " + storeName +
-                // TODO don't know if this is inclusive or exclusive on begin and end
-                " where " + KEY_VALUE_TABLE_KEY + " >= ? and " + KEY_VALUE_TABLE_KEY + " < ?";
+                " where " + KEY_VALUE_TABLE_KEY + " >= ? and " + KEY_VALUE_TABLE_KEY + " < ? order by " +
+                KEY_VALUE_TABLE_KEY;
+        if (query.hasLimit()) {
+            sql += " limit " + query.getLimit();
+        }
         log.debug("Going to execute " + sql + " with ?, ? set to <" + query.getStart().toString()
               + ">, <" + query.getEnd().toString() + ">");
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql)) {
-            stmt.setBytes(1, query.getStart().getBytes(0, query.getStart().length()));
-            stmt.setBytes(2, query.getEnd().getBytes(0, query.getEnd().length()));
+            stmt.setBytes(1, query.getStart().as(StaticBuffer.ARRAY_FACTORY));
+            stmt.setBytes(2, query.getEnd().as(StaticBuffer.ARRAY_FACTORY));
             ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                result.add(new KeyValueEntry(StaticArrayBuffer.of(rs.getBytes(KEY_VALUE_TABLE_KEY)),
+                    StaticArrayBuffer.of(rs.getBytes(KEY_VALUE_TABLE_VALUE))));
+            }
+            // Why do I need this?  I've already filtered and limited the results
+            /*
             // Don't call this again, as getKeySelector creates a new KeySelector every time
             KeySelector selector = query.getKeySelector();
-            log.debug("XXX selector is " + selector.toString());
             while (rs.next()) {
-                StaticBuffer key = new StaticArrayBuffer(rs.getBytes(KEY_VALUE_TABLE_KEY));
-                log.debug("XXX key is " + key.toString());
+                StaticBuffer key = StaticArrayBuffer.of(rs.getBytes(KEY_VALUE_TABLE_KEY));
                 if (selector.include(key)) {
-                    log.debug("XXX key accepted");
-                    result.add(new KeyValueEntry(key,
-                        new StaticArrayBuffer(rs.getBytes(KEY_VALUE_TABLE_VALUE))));
+                    result.add(new KeyValueEntry(key, StaticArrayBuffer.of(rs.getBytes(KEY_VALUE_TABLE_VALUE))));
                 }
                 if (selector.reachedLimit()) break;
             }
+            */
         } catch (SQLException e) {
             throw new TemporaryBackendException("Unable to select", e);
         }
@@ -204,12 +211,68 @@ abstract class JdbcKeyValueStore implements OrderedKeyValueStore {
     @Override
     public Map<KVQuery, RecordIterator<KeyValueEntry>> getSlices(List<KVQuery> queries,
                                                                  StoreTransaction txh) throws BackendException {
+        throw new UnsupportedOperationException();
+        /*
         Preconditions.checkState(!closed);
         Map<KVQuery, RecordIterator<KeyValueEntry>> result = new HashMap<>(queries.size());
         for (KVQuery query : queries) {
             result.put(query, getSlice(query, txh));
         }
         return result;
+        */
+    }
+
+    void deleteMany(List<StaticBuffer> keys, StoreTransaction txh) throws BackendException {
+        Preconditions.checkState(!closed);
+        StringBuilder sql = new StringBuilder("delete from ")
+            .append(storeName)
+            .append(" where ")
+            .append(KEY_VALUE_TABLE_KEY)
+            .append(" in (");
+        boolean first = true;
+        for (int i = 0; i < keys.size(); i++) {
+            if (first) first = false;
+            else sql.append(", ");
+            sql.append("?");
+        }
+        sql.append(")");
+        log.debug("Going to execute " + sql.toString());
+        try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql.toString())) {
+            for (int i = 0; i < keys.size(); i++) {
+                stmt.setBytes(i + 1, keys.get(i).as(StaticBuffer.ARRAY_FACTORY));
+            }
+            stmt.execute();
+        } catch (SQLException e) {
+            throw new TemporaryBackendException("Unable to delete records", e);
+        }
+    }
+
+    void insertMany(List<KeyValueEntry> inserts, StoreTransaction txh) throws BackendException {
+        Preconditions.checkState(!closed);
+        StringBuilder sql = new StringBuilder("insert into ")
+            .append(storeName)
+            .append(" (")
+            .append(KEY_VALUE_TABLE_KEY)
+            .append(", ")
+            .append(KEY_VALUE_TABLE_VALUE)
+            .append(") ")
+            .append(" values ");
+        boolean first = true;
+        for (int i = 0; i < inserts.size(); i++) {
+            if (first) first = false;
+            else sql.append(", ");
+            sql.append("(?, ?)");
+        }
+        log.debug("Going to execute " + sql.toString());
+        try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql.toString())) {
+            for (int i = 0; i < inserts.size(); i++) {
+                stmt.setBytes(i * 2 + 1, inserts.get(i).getKey().as(StaticBuffer.ARRAY_FACTORY));
+                stmt.setBytes(i * 2 + 2, inserts.get(i).getValue().as(StaticBuffer.ARRAY_FACTORY));
+            }
+            stmt.execute();
+        } catch (SQLException e) {
+            throw new TemporaryBackendException("Unable to insert records", e);
+        }
     }
 
     private boolean storeNameIsOk(String name) {
