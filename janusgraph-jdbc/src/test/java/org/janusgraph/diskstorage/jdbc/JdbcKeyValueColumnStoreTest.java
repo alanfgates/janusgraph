@@ -27,7 +27,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 
-public class JdbcFixedLengthKCVSTest extends KeyColumnValueStoreTest {
+public class JdbcKeyValueColumnStoreTest extends KeyColumnValueStoreTest {
     private static final Logger log = LoggerFactory.getLogger(JdbcKeyValueStoreTest.class);
 
     @Rule
