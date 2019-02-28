@@ -14,7 +14,6 @@
 
 package org.janusgraph.diskstorage.jdbc;
 
-import com.opentable.db.postgres.embedded.EmbeddedPostgres;
 import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
 import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.BackendException;
@@ -22,7 +21,6 @@ import org.janusgraph.diskstorage.KeyValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStoreManager;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.junit.Rule;
-import org.junit.jupiter.api.BeforeAll;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,19 +29,9 @@ import javax.sql.DataSource;
 public class JdbcKeyValueStoreTest extends KeyValueStoreTest {
     private static final Logger log = LoggerFactory.getLogger(JdbcKeyValueStoreTest.class);
 
-    private static EmbeddedPostgres pg;
-    private static DataSource ds;
-
-    //@Rule public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
+    @Rule public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
     private JdbcStoreManager mgr;
 
-
-    @BeforeAll
-    public static void startPostgres() {
-
-
-
-    }
 
     @Override
     public OrderedKeyValueStoreManager openStorageManager() throws BackendException {
