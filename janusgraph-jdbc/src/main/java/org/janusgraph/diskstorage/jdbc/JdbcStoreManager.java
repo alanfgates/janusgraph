@@ -22,19 +22,17 @@ import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.BaseTransactionConfig;
 import org.janusgraph.diskstorage.PermanentBackendException;
 import org.janusgraph.diskstorage.StaticBuffer;
+import org.janusgraph.diskstorage.StoreMetaData;
 import org.janusgraph.diskstorage.TemporaryBackendException;
 import org.janusgraph.diskstorage.common.AbstractStoreManager;
-import org.janusgraph.diskstorage.configuration.ConfigNamespace;
-import org.janusgraph.diskstorage.configuration.ConfigOption;
 import org.janusgraph.diskstorage.configuration.Configuration;
+import org.janusgraph.diskstorage.keycolumnvalue.KCVMutation;
+import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStore;
+import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyRange;
 import org.janusgraph.diskstorage.keycolumnvalue.StandardStoreFeatures;
 import org.janusgraph.diskstorage.keycolumnvalue.StoreFeatures;
 import org.janusgraph.diskstorage.keycolumnvalue.StoreTransaction;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.KVMutation;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.KeyValueEntry;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStore;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStoreManager;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,7 +44,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -55,41 +52,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class JdbcStoreManager extends AbstractStoreManager implements OrderedKeyValueStoreManager {
+public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcStoreManager.class);
-
-    public static final ConfigNamespace JDBC_NS =
-        new ConfigNamespace(GraphDatabaseConfiguration.STORAGE_NS, "jdbc", "SQL JDBC backend " +
-            "storage configuration options");
-
-    public static final ConfigOption<String> JDBC_URL = new ConfigOption<>(JDBC_NS,
-        "jdbc-url", "URL for JDBC connection for backends that use JDBC",
-        ConfigOption.Type.LOCAL, String.class);
-
-    public static final ConfigOption<String> JDBC_USER = new ConfigOption<>(JDBC_NS,
-        "jdbc-user", "User for JDBC connection for backends that use JDBC",
-        ConfigOption.Type.LOCAL, String.class);
-
-    // TODO - this should not be stored in the open, is there some way to encrypt this or fetch
-    // it securely?
-    public static final ConfigOption<String> JDBC_PASSWORD = new ConfigOption<>(JDBC_NS,
-        "jdbc-password", "Password for JDBC connection for backends that use JDBC",
-        ConfigOption.Type.LOCAL, String.class);
-
-    public static final ConfigOption<Integer> JDBC_POOL_SIZE = new ConfigOption<>(JDBC_NS,
-        "jdbc-pool-size", "JDBC connection pool size for backends that use JDBC",
-        ConfigOption.Type.MASKABLE, 10, ConfigOption.positiveInt());
-
-    public static final ConfigOption<Duration> JDBC_TIMEOUT = new ConfigOption<>(JDBC_NS,
-        "jdbc-timeout", "JDBC connection timeout in seconds for backends that use JDBC",
-        ConfigOption.Type.MASKABLE, Duration.ofSeconds(30L));
 
     static final String STORES_TABLE = "jg_stores";
 
     static final String STORES_NAME = "st_name";
-    static final String STORES_SCHEMA =
-        "(" + STORES_NAME + " varchar(128) primary key)";
+    private static final String STORES_SCHEMA = "(" + STORES_NAME + " varchar(128) primary key)";
 
     private final DataSource connPool;
     // List of our transactions, so we know what to shutdown at close.  Kept in a
@@ -100,7 +70,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
     private final StoreFeatures features;
 
-    final ConcurrentMap<String, JdbcKeyValueStore> stores;
+    final ConcurrentMap<String, JdbcStore> stores;
 
     public JdbcStoreManager(Configuration conf) throws BackendException {
         this(conf, null);
@@ -113,18 +83,18 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
 
         if (dataSource == null) {
             // If the caller has not passed in a dataSource, then create a connection pool.
-            Preconditions.checkArgument(conf.has(JDBC_URL) && conf.has(JDBC_USER) &&
-                    conf.has(JDBC_PASSWORD),
-                "Please supply configuration parameters " + JDBC_URL + ", " + JDBC_USER
-                    + ", " + JDBC_PASSWORD);
+            Preconditions.checkArgument(conf.has(ConfigConstants.JDBC_URL) && conf.has(ConfigConstants.JDBC_USER) &&
+                    conf.has(ConfigConstants.JDBC_PASSWORD),
+                "Please supply configuration parameters " + ConfigConstants.JDBC_URL + ", " + ConfigConstants.JDBC_USER
+                    + ", " + ConfigConstants.JDBC_PASSWORD);
 
-            String driverUrl = conf.get(JDBC_URL);
-            String user = conf.get(JDBC_USER);
-            String passwd = conf.get(JDBC_PASSWORD);
-            int maxPoolSize = conf.get(JDBC_POOL_SIZE);
+            String driverUrl = conf.get(ConfigConstants.JDBC_URL);
+            String user = conf.get(ConfigConstants.JDBC_USER);
+            String passwd = conf.get(ConfigConstants.JDBC_PASSWORD);
+            int maxPoolSize = conf.get(ConfigConstants.JDBC_POOL_SIZE);
 
-            Duration connectionTimeout = conf.get(JDBC_TIMEOUT);
-            HikariConfig config = null;
+            Duration connectionTimeout = conf.get(ConfigConstants.JDBC_TIMEOUT);
+            HikariConfig config;
             try {
                 config = new HikariConfig();
             } catch (Exception e) {
@@ -155,6 +125,8 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
         // Not 100% sure these are complete
         features = new StandardStoreFeatures.Builder()
             .orderedScan(true)
+            .unorderedScan(true)
+            .multiQuery(true)
             .transactional(true)
             .keyConsistent(GraphDatabaseConfiguration.buildGraphConfiguration())
             .keyOrdered(true)
@@ -177,7 +149,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     public void close() throws BackendException {
         if (!closed) {
             for (JdbcStoreTx tx : txs.values()) tx.rollback();
-            for (JdbcKeyValueStore store : stores.values()) store.close();
+            for (JdbcStore store : stores.values()) store.close();
         }
     }
 
@@ -227,44 +199,42 @@ public class JdbcStoreManager extends AbstractStoreManager implements OrderedKey
     }
 
     @Override
-    public List<KeyRange> getLocalKeyPartition() throws BackendException {
+    public List<KeyRange> getLocalKeyPartition() {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public OrderedKeyValueStore openDatabase(String name) throws BackendException {
-        Preconditions.checkState(!closed);
-        Preconditions.checkNotNull(name);
-        // TODO either we should make JdbcKeyValueStore backend independent or make this return the proper backend
-        return stores.computeIfAbsent(name.toLowerCase(),
-            s -> new PostgresKeyValueStore(s, JdbcStoreManager.this));
+    public KeyColumnValueStore openDatabase(String name, StoreMetaData.Container metaData) {
+        return getStore(name);
     }
 
     @Override
-    public void mutateMany(Map<String, KVMutation> mutations, StoreTransaction txh) throws BackendException {
+    public void mutateMany(Map<String, Map<StaticBuffer, KCVMutation>> mutations, StoreTransaction txh) throws BackendException {
         Preconditions.checkState(!closed);
-        for (Map.Entry<String,KVMutation> mutation : mutations.entrySet()) {
-            JdbcKeyValueStore store = (JdbcKeyValueStore)openDatabase(mutation.getKey());
-            KVMutation mutationValue = mutation.getValue();
-
-            if (mutationValue.hasAdditions()) {
-                store.insertMany(mutationValue.getAdditions(), txh);
-            }
-            if (mutationValue.hasDeletions()) {
-                store.deleteMany(mutationValue.getDeletions(), txh);
-            }
+        for (Map.Entry<String, Map<StaticBuffer, KCVMutation>> entry : mutations.entrySet()) {
+            JdbcStore store = getStore(entry.getKey());
+            store.deleteMultipleJKeys(entry.getValue(), txh);
+            store.insertMultipleJKeys(entry.getValue(), txh);
         }
     }
 
     /**
-     * Get a JDBC connection.  Package permissions because it's used by JdbcKeyValueStore.
+     * Get a JDBC connection.  Package permissions because it's used by JdbcStore.
      * @return a JDBC connection
-     * @throws BackendException if a connection could not be made.
+     * @throws SQLException if a connection could not be made.
      */
     Connection getJdbcConn() throws SQLException {
         Connection conn = connPool.getConnection();
         conn.setAutoCommit(false);
         return conn;
+    }
+
+    private JdbcStore getStore(String name) {
+        Preconditions.checkState(!closed);
+        Preconditions.checkNotNull(name);
+        // TODO either we should make JdbcStore backend independent or make this return the proper backend
+        return stores.computeIfAbsent(name.toLowerCase(),
+            s -> new PostgresKeyValueStore(s, JdbcStoreManager.this));
     }
 
     /**

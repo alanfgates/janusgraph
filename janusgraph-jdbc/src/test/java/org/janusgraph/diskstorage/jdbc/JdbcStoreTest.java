@@ -1,4 +1,4 @@
-// Copyright 2017 JanusGraph Authors
+// Copyright 2019 JanusGraph Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,13 +13,11 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-import com.google.common.collect.ImmutableMap;
 import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
 import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStoreManagerAdapter;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.junit.Rule;
 import org.slf4j.Logger;
@@ -27,8 +25,8 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 
-public class JdbcKeyValueColumnStoreTest extends KeyColumnValueStoreTest {
-    private static final Logger log = LoggerFactory.getLogger(JdbcKeyValueStoreTest.class);
+public class JdbcStoreTest extends KeyColumnValueStoreTest {
+    private static final Logger log = LoggerFactory.getLogger(JdbcStoreTest.class);
 
     @Rule
     public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
@@ -39,9 +37,7 @@ public class JdbcKeyValueColumnStoreTest extends KeyColumnValueStoreTest {
         if (mgr == null) {
             log.debug("Creating new storage manager");
             DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
-            mgr = new OrderedKeyValueStoreManagerAdapter(new JdbcStoreManager(
-                GraphDatabaseConfiguration.buildGraphConfiguration(), conn),
-                ImmutableMap.of(storeName, 8));
+            mgr = new JdbcStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
         }
         return mgr;
     }

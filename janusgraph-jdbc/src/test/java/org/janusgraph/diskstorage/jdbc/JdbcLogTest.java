@@ -17,7 +17,6 @@ import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
 import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
-import org.janusgraph.diskstorage.keycolumnvalue.keyvalue.OrderedKeyValueStoreManagerAdapter;
 import org.janusgraph.diskstorage.log.KCVSLogTest;
 import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.junit.Rule;
@@ -27,7 +26,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 
 public class JdbcLogTest extends KCVSLogTest  {
-    private static final Logger log = LoggerFactory.getLogger(JdbcKeyValueStoreTest.class);
+    private static final Logger log = LoggerFactory.getLogger(JdbcLogTest.class);
 
     @Rule
     public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
@@ -41,6 +40,6 @@ public class JdbcLogTest extends KCVSLogTest  {
             DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
             mgr = new JdbcStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
         }
-        return new OrderedKeyValueStoreManagerAdapter(mgr);
+        return mgr;
     }
 }

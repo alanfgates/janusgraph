@@ -1,4 +1,4 @@
-// Copyright 2017 JanusGraph Authors
+// Copyright 2019 JanusGraph Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,19 +13,14 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-public class PostgresKeyValueStore extends JdbcKeyValueStore {
+public class PostgresKeyValueStore extends JdbcStore {
 
     public PostgresKeyValueStore(String name, JdbcStoreManager mgr) {
         super(name, mgr);
     }
 
     @Override
-    protected String getKeyType() {
-        return "bytea";
-    }
-
-    @Override
-    protected String getValueType() {
+    protected String getBinaryType() {
         return "bytea";
     }
 }
