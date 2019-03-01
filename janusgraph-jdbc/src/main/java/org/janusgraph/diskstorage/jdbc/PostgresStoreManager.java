@@ -32,9 +32,4 @@ public class PostgresStoreManager extends JdbcStoreManager {
     protected JdbcStore buildStore(String storeName) {
         return new PostgresStore(storeName, this);
     }
-
-    @Override
-    protected String getIndexDrop(String storeName) {
-        return "drop index " + storeNameToColIndexName(storeName);
-    }
 }

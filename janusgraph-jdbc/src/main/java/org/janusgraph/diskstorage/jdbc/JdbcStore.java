@@ -39,6 +39,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -207,7 +208,6 @@ abstract class JdbcStore implements KeyColumnValueStore {
                 for (StaticBuffer col : keyEntry.getValue().getDeletions()) {
                     stmt.setBytes(psval++, jkey);
                     stmt.setBytes(psval++, col.as(StaticBuffer.ARRAY_FACTORY));
-                    log.debug("delete key is " + keyEntry.getKey() + " jcol is " + col);
                 }
             }
             stmt.execute();
@@ -223,6 +223,18 @@ abstract class JdbcStore implements KeyColumnValueStore {
         // If there are no inserts, bail
         int numInserts = totalSize(inserts, true);
         if (numInserts == 0) return;
+
+        // Janus does inserts with the assumption that they are upserts.  So blindly delete in front of
+        // inserts as this isn't an error.
+        Map<StaticBuffer, KCVMutation> preDeletes = new HashMap<>(inserts.size());
+        for (Map.Entry<StaticBuffer, KCVMutation> keyEntry : inserts.entrySet()) {
+            List<StaticBuffer> deletes = new ArrayList<>(keyEntry.getValue().getAdditions().size());
+            for (Entry entry : keyEntry.getValue().getAdditions()) {
+                deletes.add(entry.getColumn());
+            }
+            preDeletes.put(keyEntry.getKey(), new KCVMutation(Collections.emptyList(), deletes));
+        }
+        deleteMultipleJKeys(preDeletes, txh);
 
         StringBuilder sql = new StringBuilder("insert into ").append(storeName)
             .append(" (").append(JKEY_COLUMN).append(", ").append(JCOL_COLUMN).append(", ").append(JVAL_COLUMN).append(") ")
@@ -242,7 +254,6 @@ abstract class JdbcStore implements KeyColumnValueStore {
                     stmt.setBytes(psval++, jkey);
                     stmt.setBytes(psval++, colEntry.getColumn().as(StaticBuffer.ARRAY_FACTORY));
                     stmt.setBytes(psval++, colEntry.getValue().as(StaticBuffer.ARRAY_FACTORY));
-                    log.debug("insert key is " + keyEntry.getKey() + " jcol is " + colEntry.getColumn() + " val is " + colEntry.getValue());
                 }
             }
             stmt.execute();

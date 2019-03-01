@@ -78,7 +78,7 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
                 // add a 10th element
                 StaticBuffer col = KeyColumnValueStoreUtil.longToByteBuffer(NUM_COLS);
                 upserts.add(StaticArrayEntry.of(col, col));
-                keyEntry.put(key, new KCVMutation(upserts, Arrays.asList(inserts.get(0).getColumn(), inserts.get(1).getColumn())));
+                keyEntry.put(key, new KCVMutation(upserts, Collections.singletonList(inserts.get(0).getColumn())));
 
                 // Pass back a modified copy of the list.
                 List<Entry> expectedVals = new LinkedList<>(inserts);
@@ -194,7 +194,7 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
         upserts.add(StaticArrayEntry.of(col, col));
         Map<String, Map<StaticBuffer, KCVMutation>> mutations = Collections.singletonMap(storeName,
             Collections.singletonMap(key,
-                new KCVMutation(upserts, Arrays.asList(cols.get(0).getColumn(), cols.get(1).getColumn()))));
+                new KCVMutation(upserts, Collections.singletonList(cols.get(0).getColumn()))));
         try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
             manager.mutateMany(mutations, txn);
             txn.commit();

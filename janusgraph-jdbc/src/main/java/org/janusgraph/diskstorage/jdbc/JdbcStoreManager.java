@@ -73,7 +73,6 @@ abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColum
     final ConcurrentMap<String, JdbcStore> stores;
 
     protected abstract JdbcStore buildStore(String storeName);
-    protected abstract String getIndexDrop(String storeName);
 
     // This is for testing so that the tests can pass in an embedded Postgres source.
     @VisibleForTesting
@@ -167,16 +166,11 @@ abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColum
                     String sql = "drop table " + store;
                     log.debug("Going to execute " + sql);
                     stmt.execute(sql);
+                    // Dropping the table drops the associated index, so no need to drop it explicitly
                     sql = "delete from " + STORES_TABLE + " where " + STORES_NAME + " = '" + store + "'";
                     log.debug("Going to execute " + sql);
                     stmt.execute(sql);
                     // Commit after each drop to avoid overloading the WAL
-                    conn.commit();
-
-                    // Drop the associated index on JCOL_COLUMN
-                    sql = getIndexDrop(store);
-                    log.debug("Going to execute " + sql);
-                    stmt.execute(sql);
                     conn.commit();
                 }
             }

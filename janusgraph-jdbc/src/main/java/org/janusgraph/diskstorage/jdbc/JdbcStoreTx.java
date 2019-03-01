@@ -37,8 +37,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
     private final int txId;
     private boolean closed;
 
-    public JdbcStoreTx(BaseTransactionConfig config, Connection jdbcConn,
-                       ConcurrentMap<Integer, JdbcStoreTx> txs, int txId) {
+    JdbcStoreTx(BaseTransactionConfig config, Connection jdbcConn, ConcurrentMap<Integer, JdbcStoreTx> txs, int txId) {
         super(config);
         this.jdbcConn = jdbcConn;
         this.txs = txs;
@@ -51,7 +50,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
     public void commit() throws BackendException {
         if (!closed) {
             try {
-                log.debug("Committing");
+                log.debug("TXN-OP Committing transaction " + txId);
                 jdbcConn.commit();
                 jdbcConn.close();
             } catch (SQLException e) {
@@ -67,7 +66,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
     public void rollback() throws BackendException {
         if (!closed) {
             try {
-                log.debug("Aborting");
+                log.debug("TXN-OP Aborting transaction " + txId);
                 jdbcConn.rollback();
                 jdbcConn.close();
             } catch (SQLException e) {
@@ -91,6 +90,10 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
     }
 
     Connection getJdbcConn() {
-        return closed ? null : jdbcConn;
+        if (closed) throw new IllegalStateException("Attempt to get connection on closed transaction");
+        if (log.isDebugEnabled()) {
+            log.debug("TXN-OP " + Thread.currentThread().getName() + " getting jdbc connection for transaction " + txId);
+        }
+        return jdbcConn;
     }
 }
