@@ -20,11 +20,13 @@ import org.janusgraph.diskstorage.common.AbstractStoreTransaction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.concurrent.ConcurrentMap;
 
-public class JdbcStoreTx extends AbstractStoreTransaction {
+public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcStoreTx.class);
 
@@ -73,6 +75,17 @@ public class JdbcStoreTx extends AbstractStoreTransaction {
             } finally {
                 txs.remove(txId);
                 closed = true;
+            }
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (!closed) {
+            try {
+                rollback();
+            } catch (BackendException e) {
+                throw new IOException(e);
             }
         }
     }

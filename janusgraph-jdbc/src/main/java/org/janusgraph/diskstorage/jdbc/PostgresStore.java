@@ -13,14 +13,20 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-public class PostgresKeyValueStore extends JdbcStore {
+public class PostgresStore extends JdbcStore {
 
-    public PostgresKeyValueStore(String name, JdbcStoreManager mgr) {
+    public PostgresStore(String name, JdbcStoreManager mgr) {
         super(name, mgr);
     }
 
     @Override
     protected String getBinaryType() {
         return "bytea";
+    }
+
+    @Override
+    protected String getIndexDefinition(String storeName, String colName) {
+        return "create index " + JdbcStoreManager.storeNameToColIndexName(storeName) + " on " + storeName +
+            " using btree (" + colName + ")";
     }
 }

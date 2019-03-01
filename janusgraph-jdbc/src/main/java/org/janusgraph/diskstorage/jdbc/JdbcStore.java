@@ -34,18 +34,18 @@ import org.janusgraph.diskstorage.util.StaticArrayEntryList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,6 +66,7 @@ abstract class JdbcStore implements KeyColumnValueStore {
     private boolean closed;
 
     abstract protected String getBinaryType();
+    abstract protected String getIndexDefinition(String storeName, String colName);
 
     JdbcStore(String name, JdbcStoreManager mgr) {
         Preconditions.checkArgument(storeNameIsOk(name),
@@ -93,11 +94,11 @@ abstract class JdbcStore implements KeyColumnValueStore {
             stmt.setBytes(psval++, query.getSliceStart().as(StaticBuffer.ARRAY_FACTORY));
             stmt.setBytes(psval++, query.getSliceEnd().as(StaticBuffer.ARRAY_FACTORY));
             ResultSet rs = stmt.executeQuery();
-            Map<byte[], byte[]> vals = new HashMap<>();
+            SortedMap<StaticBuffer, StaticBuffer> vals = new TreeMap<>();
             while (rs.next()) {
-                vals.put(rs.getBytes(JCOL_COLUMN), rs.getBytes(JVAL_COLUMN));
+                vals.put(StaticArrayBuffer.of(rs.getBytes(JCOL_COLUMN)), StaticArrayBuffer.of(rs.getBytes(JVAL_COLUMN)));
             }
-            return StaticArrayEntryList.ofBytes(vals.entrySet(), rsGetter);
+            return StaticArrayEntryList.ofStaticBuffer(vals.entrySet(), rsGetter);
         } catch (SQLException e) {
             log.error("Unable to select records", e);
             throw new TemporaryBackendException("Unable to select records", e);
@@ -117,9 +118,6 @@ abstract class JdbcStore implements KeyColumnValueStore {
         }
         sql.append(") and ").append(JCOL_COLUMN).append(" >= ? and ").append(JCOL_COLUMN).append(" < ? ")
             .append("order by ").append(JKEY_COLUMN).append(", ").append(JCOL_COLUMN);
-        if (query.hasLimit()) {
-            sql.append(" limit ").append(query.getLimit());
-        }
         log.debug("Going to execute " + sql.toString());
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql.toString())) {
             int psval = 1;
@@ -130,18 +128,19 @@ abstract class JdbcStore implements KeyColumnValueStore {
             stmt.setBytes(psval++, query.getSliceEnd().as(StaticBuffer.ARRAY_FACTORY));
             ResultSet rs = stmt.executeQuery();
             Map<StaticBuffer, EntryList> results = new HashMap<>();
-            byte[] currKey = null;
-            Map<byte[], byte[]> currCols = null;
+            StaticBuffer currKey = null;
+            Map<StaticBuffer, StaticBuffer> currCols = null;
             while (rs.next()) {
-                byte[] thisKey = rs.getBytes(JKEY_COLUMN);
-                if (!Arrays.equals(thisKey, currKey)) {
+                StaticBuffer thisKey = StaticArrayBuffer.of(rs.getBytes(JKEY_COLUMN));
+                if (!thisKey.equals(currKey)) {
                     if (currKey != null) {
-                        results.put(StaticArrayBuffer.of(currKey), StaticArrayEntryList.ofBytes(currCols.entrySet(), rsGetter));
+                        results.put(currKey, StaticArrayEntryList.ofStaticBuffer(currCols.entrySet(), rsGetter));
                     }
                     currKey = thisKey;
                     currCols = new HashMap<>();
                 }
-                currCols.put(rs.getBytes(JCOL_COLUMN), rs.getBytes(JVAL_COLUMN));
+                if (query.hasLimit() && currCols.size() >= query.getLimit()) continue;
+                currCols.put(StaticArrayBuffer.of(rs.getBytes(JCOL_COLUMN)), StaticArrayBuffer.of(rs.getBytes(JVAL_COLUMN)));
             }
             return results;
         } catch (SQLException e) {
@@ -152,12 +151,12 @@ abstract class JdbcStore implements KeyColumnValueStore {
 
     @Override
     public void mutate(StaticBuffer key, List<Entry> additions, List<StaticBuffer> deletions, StoreTransaction txh) throws BackendException {
-        deleteMultipleJKeys(Collections.singletonMap(key, new KCVMutation(Collections.emptyList(), deletions)), txh);
-        insertMultipleJKeys(Collections.singletonMap(key, new KCVMutation(additions, Collections.emptyList())), txh);
+        if (deletions != null && !deletions.isEmpty()) deleteMultipleJKeys(Collections.singletonMap(key, new KCVMutation(Collections.emptyList(), deletions)), txh);
+        if (additions != null && !additions.isEmpty()) insertMultipleJKeys(Collections.singletonMap(key, new KCVMutation(additions, Collections.emptyList())), txh);
     }
 
     @Override
-    public void acquireLock(StaticBuffer key, StaticBuffer column, StaticBuffer expectedValue, StoreTransaction txh) throws BackendException {
+    public void acquireLock(StaticBuffer key, StaticBuffer column, StaticBuffer expectedValue, StoreTransaction txh) {
         throw new UnsupportedOperationException();
     }
 
@@ -178,7 +177,7 @@ abstract class JdbcStore implements KeyColumnValueStore {
     }
 
     @Override
-    public void close() throws BackendException {
+    public void close() {
         if (!closed) {
             closed = true;
             // Remove it from the list of valid stores.
@@ -188,10 +187,14 @@ abstract class JdbcStore implements KeyColumnValueStore {
 
     void deleteMultipleJKeys(Map<StaticBuffer, KCVMutation> deletes, StoreTransaction txh) throws BackendException {
         Preconditions.checkState(!closed);
+        // There may not be any deletes in what we've been passed.  If not, bail here.
+        int numDeletes = totalSize(deletes, false);
+        if (numDeletes == 0) return;
+
         StringBuilder sql = new StringBuilder("delete from ").append(storeName)
             .append(" where ");
         boolean first = true;
-        for (int i = 0; i < totalSize(deletes, false); i++) {
+        for (int i = 0; i < numDeletes; i++) {
             if (first) first = false;
             else sql.append(" or ");
             sql.append("(").append(JKEY_COLUMN).append(" = ? and ").append(JCOL_COLUMN).append(" = ?)");
@@ -204,21 +207,28 @@ abstract class JdbcStore implements KeyColumnValueStore {
                 for (StaticBuffer col : keyEntry.getValue().getDeletions()) {
                     stmt.setBytes(psval++, jkey);
                     stmt.setBytes(psval++, col.as(StaticBuffer.ARRAY_FACTORY));
+                    log.debug("delete key is " + keyEntry.getKey() + " jcol is " + col);
                 }
             }
             stmt.execute();
         } catch (SQLException e) {
+            log.error("Unable to delete records", e);
             throw new TemporaryBackendException("Unable to delete records", e);
         }
     }
 
     void insertMultipleJKeys(Map<StaticBuffer, KCVMutation> inserts, StoreTransaction txh) throws BackendException {
         Preconditions.checkState(!closed);
+
+        // If there are no inserts, bail
+        int numInserts = totalSize(inserts, true);
+        if (numInserts == 0) return;
+
         StringBuilder sql = new StringBuilder("insert into ").append(storeName)
             .append(" (").append(JKEY_COLUMN).append(", ").append(JCOL_COLUMN).append(", ").append(JVAL_COLUMN).append(") ")
             .append(" values ");
         boolean first = true;
-        for (int i = 0; i < totalSize(inserts, true); i++) {
+        for (int i = 0; i < numInserts; i++) {
             if (first) first = false;
             else sql.append(", ");
             sql.append("(?, ?, ?)");
@@ -232,10 +242,12 @@ abstract class JdbcStore implements KeyColumnValueStore {
                     stmt.setBytes(psval++, jkey);
                     stmt.setBytes(psval++, colEntry.getColumn().as(StaticBuffer.ARRAY_FACTORY));
                     stmt.setBytes(psval++, colEntry.getValue().as(StaticBuffer.ARRAY_FACTORY));
+                    log.debug("insert key is " + keyEntry.getKey() + " jcol is " + colEntry.getColumn() + " val is " + colEntry.getValue());
                 }
             }
             stmt.execute();
         } catch (SQLException e) {
+            log.error("Unable to insert records", e);
             throw new TemporaryBackendException("Unable to insert records", e);
         }
     }
@@ -270,6 +282,11 @@ abstract class JdbcStore implements KeyColumnValueStore {
                         "primary key (" + JKEY_COLUMN + ", " + JCOL_COLUMN + "))";
                     log.debug("Going to execute " + sql);
                     stmt.execute(sql);
+
+                    // Build a second index on JCOL_COLUMN for getKeys calls
+                    sql = getIndexDefinition(storeName, JCOL_COLUMN);
+                    log.debug("Going to execute " + sql);
+                    stmt.execute(sql);
                 }
             }
             log.debug("Committing");
@@ -296,9 +313,7 @@ abstract class JdbcStore implements KeyColumnValueStore {
         }
         sql.append(JCOL_COLUMN).append(" >= ? and ").append(JCOL_COLUMN).append(" < ? ")
             .append("order by ").append(JKEY_COLUMN).append(", ").append(JCOL_COLUMN);
-        if (query.hasLimit()) {
-            sql.append(" limit ").append(query.getLimit());
-        }
+        // Can't use limit in the SQL query, because the limit applies to columns in each key, not to the query as a whole.
         log.debug("Going to execute " + sql.toString());
         try (PreparedStatement stmt = ((JdbcStoreTx)txh).getJdbcConn().prepareStatement(sql.toString())) {
             int psval = 1;
@@ -311,24 +326,25 @@ abstract class JdbcStore implements KeyColumnValueStore {
             ResultSet rs = stmt.executeQuery();
             // Not sure if I can return an iterator that doesn't immediately materialize the results or not.  Not sure
             // if JDBC will close the result set on me based on what the user does with the connection.
-            final Map<byte[], Map<byte[], byte[]>> materialized = new HashMap<>();
+            final Map<StaticBuffer, Map<StaticBuffer, StaticBuffer>> materialized = new HashMap<>();
             while (rs.next()) {
-                byte[] key = rs.getBytes(JKEY_COLUMN);
-                Map<byte[], byte[]> cols = materialized.computeIfAbsent(key, k -> new HashMap<>());
-                cols.put(rs.getBytes(JCOL_COLUMN), rs.getBytes(JVAL_COLUMN));
+                StaticBuffer key = StaticArrayBuffer.of(rs.getBytes(JKEY_COLUMN));
+                Map<StaticBuffer, StaticBuffer> cols = materialized.computeIfAbsent(key, k -> new HashMap<>());
+                if (query.hasLimit() && cols.size() >= query.getLimit()) continue;
+                cols.put(StaticArrayBuffer.of(rs.getBytes(JCOL_COLUMN)), StaticArrayBuffer.of(rs.getBytes(JVAL_COLUMN)));
             }
             return new KeyIterator() {
                 boolean outerClosed = false;
-                Iterator<Map.Entry<byte[], Map<byte[], byte[]>>> outerIter = materialized.entrySet().iterator();
-                Map<byte[], byte[]> currCols;
+                Iterator<Map.Entry<StaticBuffer, Map<StaticBuffer, StaticBuffer>>> outerIter = materialized.entrySet().iterator();
+                Map<StaticBuffer, StaticBuffer> currCols;
 
                 @Override
                 public RecordIterator<Entry> getEntries() {
                     return new RecordIterator<Entry>() {
                         boolean innerClosed = false;
-                        Iterator<Map.Entry<byte[], byte[]>> innerIter = currCols.entrySet().iterator();
+                        Iterator<Map.Entry<StaticBuffer, StaticBuffer>> innerIter = currCols.entrySet().iterator();
                         @Override
-                        public void close() throws IOException {
+                        public void close() {
                             innerClosed = true;
                         }
 
@@ -341,13 +357,13 @@ abstract class JdbcStore implements KeyColumnValueStore {
                         @Override
                         public Entry next() {
                             if (innerClosed) throw new IllegalStateException("Attempt to read closed iterator");
-                            return StaticArrayEntry.ofBytes(innerIter.next(), rsGetter);
+                            return StaticArrayEntry.ofStaticBuffer(innerIter.next(), rsGetter);
                         }
                     };
                 }
 
                 @Override
-                public void close() throws IOException {
+                public void close() {
                     outerClosed = true;
                 }
 
@@ -360,9 +376,9 @@ abstract class JdbcStore implements KeyColumnValueStore {
                 @Override
                 public StaticBuffer next() {
                     if (outerClosed) throw new IllegalStateException("Attempt to read closed iterator");
-                    Map.Entry<byte[], Map<byte[], byte[]>> entry = outerIter.next();
+                    Map.Entry<StaticBuffer, Map<StaticBuffer, StaticBuffer>> entry = outerIter.next();
                     currCols = entry.getValue();
-                    return StaticArrayBuffer.of(entry.getKey());
+                    return entry.getKey();
                 }
             };
         } catch (SQLException e) {
@@ -371,25 +387,25 @@ abstract class JdbcStore implements KeyColumnValueStore {
         }
     }
 
-    private final StaticArrayEntry.GetColVal<Map.Entry<byte[], byte[]>, byte[]> rsGetter =
-        new StaticArrayEntry.GetColVal<Map.Entry<byte[], byte[]>, byte[]>() {
+    private final StaticArrayEntry.GetColVal<Map.Entry<StaticBuffer, StaticBuffer>, StaticBuffer> rsGetter =
+        new StaticArrayEntry.GetColVal<Map.Entry<StaticBuffer, StaticBuffer>, StaticBuffer>() {
             @Override
-            public byte[] getColumn(Map.Entry<byte[], byte[]> element) {
+            public StaticBuffer getColumn(Map.Entry<StaticBuffer, StaticBuffer> element) {
                 return element.getKey();
             }
 
             @Override
-            public byte[] getValue(Map.Entry<byte[], byte[]> element) {
+            public StaticBuffer getValue(Map.Entry<StaticBuffer, StaticBuffer> element) {
                 return element.getValue();
             }
 
             @Override
-            public EntryMetaData[] getMetaSchema(Map.Entry<byte[], byte[]> element) {
+            public EntryMetaData[] getMetaSchema(Map.Entry<StaticBuffer, StaticBuffer> element) {
                 return mgr.getMetaDataSchema(storeName);
             }
 
             @Override
-            public Object getMetaData(Map.Entry<byte[], byte[]> element, EntryMetaData meta) {
+            public Object getMetaData(Map.Entry<StaticBuffer, StaticBuffer> element, EntryMetaData meta) {
                 throw new UnsupportedOperationException();
             }
     };

@@ -52,7 +52,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
+abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColumnValueStoreManager {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcStoreManager.class);
 
@@ -72,13 +72,12 @@ public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnV
 
     final ConcurrentMap<String, JdbcStore> stores;
 
-    public JdbcStoreManager(Configuration conf) throws BackendException {
-        this(conf, null);
-    }
+    protected abstract JdbcStore buildStore(String storeName);
+    protected abstract String getIndexDrop(String storeName);
 
     // This is for testing so that the tests can pass in an embedded Postgres source.
     @VisibleForTesting
-    JdbcStoreManager(Configuration conf, DataSource dataSource) throws BackendException {
+    protected JdbcStoreManager(Configuration conf, DataSource dataSource) throws BackendException {
         super(conf);
 
         if (dataSource == null) {
@@ -173,6 +172,12 @@ public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnV
                     stmt.execute(sql);
                     // Commit after each drop to avoid overloading the WAL
                     conn.commit();
+
+                    // Drop the associated index on JCOL_COLUMN
+                    sql = getIndexDrop(store);
+                    log.debug("Going to execute " + sql);
+                    stmt.execute(sql);
+                    conn.commit();
                 }
             }
         } catch (SQLException e) {
@@ -218,6 +223,10 @@ public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnV
         }
     }
 
+    static String storeNameToColIndexName(String storeName) {
+        return storeName + "_colindex";
+    }
+
     /**
      * Get a JDBC connection.  Package permissions because it's used by JdbcStore.
      * @return a JDBC connection
@@ -232,9 +241,7 @@ public class JdbcStoreManager extends AbstractStoreManager implements KeyColumnV
     private JdbcStore getStore(String name) {
         Preconditions.checkState(!closed);
         Preconditions.checkNotNull(name);
-        // TODO either we should make JdbcStore backend independent or make this return the proper backend
-        return stores.computeIfAbsent(name.toLowerCase(),
-            s -> new PostgresKeyValueStore(s, JdbcStoreManager.this));
+        return stores.computeIfAbsent(name.toLowerCase(), this::buildStore);
     }
 
     /**

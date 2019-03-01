@@ -38,7 +38,7 @@ public class JdbcLogTest extends KCVSLogTest  {
         if (mgr == null) {
             log.debug("Creating new storage manager");
             DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
-            mgr = new JdbcStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
+            mgr = new PostgresStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
         }
         return mgr;
     }
