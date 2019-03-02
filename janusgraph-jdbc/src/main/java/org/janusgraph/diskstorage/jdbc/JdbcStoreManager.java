@@ -37,7 +37,6 @@ import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -61,7 +60,7 @@ abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColum
     static final String STORES_NAME = "st_name";
     private static final String STORES_SCHEMA = "(" + STORES_NAME + " varchar(128) primary key)";
 
-    private final DataSource connPool;
+    private final HikariDataSource connPool;
     // List of our transactions, so we know what to shutdown at close.  Kept in a
     // ConcurrentHashMap only for the synchronization.
     private final ConcurrentMap<Integer, JdbcStoreTx> txs;
@@ -76,40 +75,34 @@ abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColum
 
     // This is for testing so that the tests can pass in an embedded Postgres source.
     @VisibleForTesting
-    protected JdbcStoreManager(Configuration conf, DataSource dataSource) throws BackendException {
+    protected JdbcStoreManager(Configuration conf) throws BackendException {
         super(conf);
 
-        if (dataSource == null) {
-            // If the caller has not passed in a dataSource, then create a connection pool.
-            Preconditions.checkArgument(conf.has(ConfigConstants.JDBC_URL) && conf.has(ConfigConstants.JDBC_USER) &&
-                    conf.has(ConfigConstants.JDBC_PASSWORD),
-                "Please supply configuration parameters " + ConfigConstants.JDBC_URL + ", " + ConfigConstants.JDBC_USER
-                    + ", " + ConfigConstants.JDBC_PASSWORD);
+        Preconditions.checkArgument(conf.has(ConfigConstants.JDBC_URL) && conf.has(ConfigConstants.JDBC_USER) &&
+                conf.has(ConfigConstants.JDBC_PASSWORD),
+            "Please supply configuration parameters " + ConfigConstants.JDBC_URL + ", " + ConfigConstants.JDBC_USER
+                + ", " + ConfigConstants.JDBC_PASSWORD);
 
-            String driverUrl = conf.get(ConfigConstants.JDBC_URL);
-            String user = conf.get(ConfigConstants.JDBC_USER);
-            String passwd = conf.get(ConfigConstants.JDBC_PASSWORD);
-            int maxPoolSize = conf.get(ConfigConstants.JDBC_POOL_SIZE);
+        String driverUrl = conf.get(ConfigConstants.JDBC_URL);
+        String user = conf.get(ConfigConstants.JDBC_USER);
+        String passwd = conf.get(ConfigConstants.JDBC_PASSWORD);
+        int maxPoolSize = conf.get(ConfigConstants.JDBC_POOL_SIZE);
 
-            Duration connectionTimeout = conf.get(ConfigConstants.JDBC_TIMEOUT);
-            HikariConfig config;
-            try {
-                config = new HikariConfig();
-            } catch (Exception e) {
-                throw new PermanentBackendException("Cannot create HikariCP configuration: ", e);
-            }
-            config.setMaximumPoolSize(maxPoolSize);
-            config.setJdbcUrl(driverUrl);
-            config.setUsername(user);
-            config.setPassword(passwd);
-            config.setConnectionTimeout(connectionTimeout.toMillis());
-            log.info("Setting up connection pool with JDBC address " + driverUrl + " and user " +
-                    user);
-            connPool = new HikariDataSource(config);
-        } else {
-            log.debug("DataSource passed in, skipping setup of connection pool.");
-            connPool = dataSource;
+        Duration connectionTimeout = conf.get(ConfigConstants.JDBC_TIMEOUT);
+        HikariConfig config;
+        try {
+            config = new HikariConfig();
+        } catch (Exception e) {
+            throw new PermanentBackendException("Cannot create HikariCP configuration: ", e);
         }
+        config.setMaximumPoolSize(maxPoolSize);
+        config.setJdbcUrl(driverUrl);
+        config.setUsername(user);
+        config.setPassword(passwd);
+        config.setConnectionTimeout(connectionTimeout.toMillis());
+        config.setAutoCommit(false);
+        log.info("Setting up connection pool with JDBC address " + driverUrl + " and user " + user);
+        connPool = new HikariDataSource(config);
 
         stores = new ConcurrentHashMap<>();
         txs = new ConcurrentHashMap<>();
@@ -148,6 +141,7 @@ abstract class JdbcStoreManager extends AbstractStoreManager implements KeyColum
         if (!closed) {
             for (JdbcStoreTx tx : txs.values()) tx.rollback();
             for (JdbcStore store : stores.values()) store.close();
+            connPool.close();
         }
     }
 

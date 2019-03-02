@@ -13,32 +13,55 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
-import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.KeyColumnValueStoreTest;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
-import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Rule;
+import org.junit.rules.TestWatcher;
+import org.junit.runner.Description;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.sql.DataSource;
+import java.io.IOException;
+import java.sql.SQLException;
 
 public class JdbcStoreTest extends KeyColumnValueStoreTest {
     private static final Logger log = LoggerFactory.getLogger(JdbcStoreTest.class);
 
-    @Rule
-    public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
+    private static String containerName;
     private KeyColumnValueStoreManager mgr;
+
+    @BeforeClass
+    public static void startPostgres() throws InterruptedException, SQLException, IOException {
+        containerName = DockerUtils.startDocker();
+    }
+
+    @AfterClass
+    public static void stopPostgres() throws IOException, InterruptedException {
+        DockerUtils.shutdownDocker(containerName);
+    }
+
+    @Rule
+    public TestWatcher testStartAndFinishLogNotification = new TestWatcher() {
+        @Override
+        protected void starting(Description description) {
+            super.starting(description);
+            log.debug("TEST Starting test " + description.getMethodName());
+        }
+
+        @Override
+        protected void finished(Description description) {
+            super.finished(description);
+            log.debug("TEST Finished test " + description.getMethodName());
+        }
+    };
 
     @Override
     public KeyColumnValueStoreManager openStorageManager() throws BackendException {
-        if (mgr == null) {
-            log.debug("Creating new storage manager");
-            DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
-            mgr = new PostgresStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
-        }
+        log.debug("Creating new storage manager");
+        mgr = new PostgresStoreManager(DockerUtils.getConfig());
         return mgr;
     }
 }

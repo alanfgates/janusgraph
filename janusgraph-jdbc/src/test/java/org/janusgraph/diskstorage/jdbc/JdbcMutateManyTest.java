@@ -13,8 +13,6 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
-import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.AbstractKCVSTest;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.Entry;
@@ -25,18 +23,18 @@ import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStore;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
 import org.janusgraph.diskstorage.keycolumnvalue.KeySliceQuery;
 import org.janusgraph.diskstorage.util.StaticArrayEntry;
-import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
+import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.Rule;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.sql.DataSource;
 import java.io.IOException;
+import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -47,16 +45,29 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
     private static final Logger log = LoggerFactory.getLogger(JdbcLogTest.class);
     private static final int NUM_COLS = 10;
 
-    @Rule
-    public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
-    private JdbcStoreManager manager;
+    private static String containerName;
 
+    private KeyColumnValueStoreManager mgr;
+
+    @BeforeClass
+    public static void startPostgres() throws InterruptedException, SQLException, IOException {
+        containerName = DockerUtils.startDocker();
+    }
+
+    @AfterClass
+    public static void stopPostgres() throws IOException, InterruptedException {
+        DockerUtils.shutdownDocker(containerName);
+    }
 
     @Before
     public void openStorageManager() throws BackendException {
         log.debug("Creating new storage manager");
-        DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
-        manager = new PostgresStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
+        mgr = new PostgresStoreManager(DockerUtils.getConfig());
+    }
+
+    @After
+    public void closeManager() throws BackendException {
+        if (mgr != null) mgr.close();
     }
 
     // Test that one mutateMany call can do inserts, updates, and deletes on multiple stores.  Make it big enough
@@ -88,14 +99,14 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
                 expectedKeyEntry.put(key, expectedVals);
             }
         }
-        try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
-            manager.mutateMany(mutations, txn);
+        try (JdbcStoreTx txn = (JdbcStoreTx)mgr.beginTransaction(getTxConfig())) {
+            mgr.mutateMany(mutations, txn);
             txn.commit();
         }
 
         for (Map.Entry<String, Map<StaticBuffer, List<Entry>>> expectedEntry : expected.entrySet()) {
             for (Map.Entry<StaticBuffer, List<Entry>> expectedKeyEntry : expectedEntry.getValue().entrySet()) {
-                KeyColumnValueStore store = manager.openDatabase(expectedEntry.getKey());
+                KeyColumnValueStore store = mgr.openDatabase(expectedEntry.getKey());
                 checkColumnsForOneKey(store, expectedKeyEntry.getKey(), expectedKeyEntry.getValue());
             }
         }
@@ -120,14 +131,14 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
                 expectedEntry.put(key, inserts);
             }
         }
-        try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
-            manager.mutateMany(mutations, txn);
+        try (JdbcStoreTx txn = (JdbcStoreTx)mgr.beginTransaction(getTxConfig())) {
+            mgr.mutateMany(mutations, txn);
             txn.commit();
         }
 
         for (Map.Entry<String, Map<StaticBuffer, List<Entry>>> expectedEntry : expected.entrySet()) {
             for (Map.Entry<StaticBuffer, List<Entry>> expectedKeyEntry : expectedEntry.getValue().entrySet()) {
-                KeyColumnValueStore store = manager.openDatabase(expectedEntry.getKey());
+                KeyColumnValueStore store = mgr.openDatabase(expectedEntry.getKey());
                 checkColumnsForOneKey(store, expectedKeyEntry.getKey(), expectedKeyEntry.getValue());
             }
         }
@@ -142,7 +153,7 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
         List<Entry> inserted = insertColumnsForOneKey(storeName, key);
 
         // Make sure it's all there
-        KeyColumnValueStore store = manager.openDatabase(storeName);
+        KeyColumnValueStore store = mgr.openDatabase(storeName);
         checkColumnsForOneKey(store, key, inserted);
     }
 
@@ -154,7 +165,7 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
 
         List<Entry> updated = modColumnsForOneKey(storeName, key, inserted);
 
-        KeyColumnValueStore store = manager.openDatabase(storeName);
+        KeyColumnValueStore store = mgr.openDatabase(storeName);
         checkColumnsForOneKey(store, key, updated);
     }
 
@@ -166,15 +177,15 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
         }
         Map<String, Map<StaticBuffer, KCVMutation>> mutations = Collections.singletonMap(storeName,
             Collections.singletonMap(key, new KCVMutation(entries, Collections.emptyList())));
-        try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
-            manager.mutateMany(mutations, txn);
+        try (JdbcStoreTx txn = (JdbcStoreTx)mgr.beginTransaction(getTxConfig())) {
+            mgr.mutateMany(mutations, txn);
             txn.commit();
         }
         return entries;
     }
 
     private void checkColumnsForOneKey(KeyColumnValueStore store, StaticBuffer key, List<Entry> expected) throws BackendException, IOException {
-        try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
+        try (JdbcStoreTx txn = (JdbcStoreTx)mgr.beginTransaction(getTxConfig())) {
             List<Entry> readBack = store.getSlice(new KeySliceQuery(key, KeyColumnValueStoreUtil.longToByteBuffer(0),
                 KeyColumnValueStoreUtil.longToByteBuffer(100)), txn);
             Assert.assertEquals(NUM_COLS, readBack.size());
@@ -195,8 +206,8 @@ public class JdbcMutateManyTest extends AbstractKCVSTest  {
         Map<String, Map<StaticBuffer, KCVMutation>> mutations = Collections.singletonMap(storeName,
             Collections.singletonMap(key,
                 new KCVMutation(upserts, Collections.singletonList(cols.get(0).getColumn()))));
-        try (JdbcStoreTx txn = (JdbcStoreTx)manager.beginTransaction(getTxConfig())) {
-            manager.mutateMany(mutations, txn);
+        try (JdbcStoreTx txn = (JdbcStoreTx)mgr.beginTransaction(getTxConfig())) {
+            mgr.mutateMany(mutations, txn);
             txn.commit();
         }
 

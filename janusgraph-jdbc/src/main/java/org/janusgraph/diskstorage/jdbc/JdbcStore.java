@@ -143,6 +143,10 @@ abstract class JdbcStore implements KeyColumnValueStore {
                 if (query.hasLimit() && currCols.size() >= query.getLimit()) continue;
                 currCols.put(StaticArrayBuffer.of(rs.getBytes(JCOL_COLUMN)), StaticArrayBuffer.of(rs.getBytes(JVAL_COLUMN)));
             }
+            // Have to do it one last time to pick up the final key
+            if (currKey != null) {
+                results.put(currKey, StaticArrayEntryList.ofStaticBuffer(currCols.entrySet(), rsGetter));
+            }
             return results;
         } catch (SQLException e) {
             log.error("Unable to select records", e);

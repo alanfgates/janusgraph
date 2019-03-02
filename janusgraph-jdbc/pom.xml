@@ -33,18 +33,10 @@
             <version>${hikaricp.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.opentable.components</groupId>
-            <artifactId>otj-pg-embedded</artifactId>
-            <version>${pg-embedded.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <!--
-        <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>${postgres.version}</version>
             <scope>test</scope>
         </dependency>
-        -->
     </dependencies>
 </project>

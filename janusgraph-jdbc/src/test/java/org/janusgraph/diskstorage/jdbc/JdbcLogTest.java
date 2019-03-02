@@ -13,33 +13,37 @@
 // limitations under the License.
 package org.janusgraph.diskstorage.jdbc;
 
-import com.opentable.db.postgres.junit.EmbeddedPostgresRules;
-import com.opentable.db.postgres.junit.SingleInstancePostgresRule;
 import org.janusgraph.diskstorage.BackendException;
 import org.janusgraph.diskstorage.keycolumnvalue.KeyColumnValueStoreManager;
 import org.janusgraph.diskstorage.log.KCVSLogTest;
-import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
-import org.junit.Rule;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.sql.DataSource;
+import java.io.IOException;
+import java.sql.SQLException;
 
 public class JdbcLogTest extends KCVSLogTest  {
     private static final Logger log = LoggerFactory.getLogger(JdbcLogTest.class);
 
-    @Rule
-    public SingleInstancePostgresRule pg = EmbeddedPostgresRules.singleInstance();
-    private JdbcStoreManager mgr;
+    private static String containerName;
+    private KeyColumnValueStoreManager mgr;
 
+    @BeforeClass
+    public static void startPostgres() throws InterruptedException, SQLException, IOException {
+        containerName = DockerUtils.startDocker();
+    }
+
+    @AfterClass
+    public static void stopPostgres() throws IOException, InterruptedException {
+        DockerUtils.shutdownDocker(containerName);
+    }
 
     @Override
     public KeyColumnValueStoreManager openStorageManager() throws BackendException {
-        if (mgr == null) {
-            log.debug("Creating new storage manager");
-            DataSource conn = pg.getEmbeddedPostgres().getPostgresDatabase();
-            mgr = new PostgresStoreManager(GraphDatabaseConfiguration.buildGraphConfiguration(), conn);
-        }
+        log.debug("Creating new storage manager");
+        mgr = new PostgresStoreManager(DockerUtils.getConfig());
         return mgr;
     }
 }

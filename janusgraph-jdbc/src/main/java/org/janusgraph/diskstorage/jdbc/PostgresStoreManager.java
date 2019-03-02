@@ -21,11 +21,7 @@ import javax.sql.DataSource;
 public class PostgresStoreManager extends JdbcStoreManager {
 
     public PostgresStoreManager(Configuration conf) throws BackendException {
-        this(conf, null);
-    }
-
-    PostgresStoreManager(Configuration conf, DataSource dataSource) throws BackendException {
-        super(conf, dataSource);
+        super(conf);
     }
 
     @Override

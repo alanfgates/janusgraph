@@ -624,13 +624,14 @@ public abstract class KeyColumnValueStoreTest extends AbstractKCVSTest {
 
     public void checkSlice(String[][] values, Set<KeyColumn> removed, int key,
                            int start, int end, int limit) throws BackendException {
-        tx.rollback();
-        tx = startTx();
+        //tx.rollback();
+        StoreTransaction txlocal = startTx();
         List<Entry> entries;
         if (limit <= 0)
-            entries = store.getSlice(new KeySliceQuery(KeyValueStoreUtil.getBuffer(key), KeyValueStoreUtil.getBuffer(start), KeyValueStoreUtil.getBuffer(end)), tx);
+            entries = store.getSlice(new KeySliceQuery(KeyValueStoreUtil.getBuffer(key), KeyValueStoreUtil.getBuffer(start), KeyValueStoreUtil.getBuffer(end)), txlocal);
         else
-            entries = store.getSlice(new KeySliceQuery(KeyValueStoreUtil.getBuffer(key), KeyValueStoreUtil.getBuffer(start), KeyValueStoreUtil.getBuffer(end)).setLimit(limit), tx);
+            entries = store.getSlice(new KeySliceQuery(KeyValueStoreUtil.getBuffer(key), KeyValueStoreUtil.getBuffer(start), KeyValueStoreUtil.getBuffer(end)).setLimit(limit), txlocal);
+        txlocal.rollback();
 
         int pos = 0;
         for (int i = start; i < end; i++) {
@@ -788,11 +789,11 @@ public abstract class KeyColumnValueStoreTest extends AbstractKCVSTest {
                     if (deletionEnabled) {
                         int delCol = RandomGenerator.randomInt(start, end);
                         ImmutableList<StaticBuffer> deletions = ImmutableList.of(KeyValueStoreUtil.getBuffer(delCol));
-                        store.mutate(KeyValueStoreUtil.getBuffer(key), KeyColumnValueStore.NO_ADDITIONS, deletions, tx);
+                        StoreTransaction txlocal = startTx();
+                        store.mutate(KeyValueStoreUtil.getBuffer(key), KeyColumnValueStore.NO_ADDITIONS, deletions, txlocal);
                         log.debug("Deleting ({},{})", key, delCol);
                         d.add(new KeyColumn(key, delCol));
-                        tx.commit();
-                        tx = startTx();
+                        txlocal.commit();
                     }
                     //clopen();
                     checkSlice(values, d, key, start, end, limit);

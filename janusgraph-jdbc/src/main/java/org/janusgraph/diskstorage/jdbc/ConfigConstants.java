@@ -25,10 +25,10 @@ public class ConfigConstants {
             "storage configuration options");
     public static final ConfigOption<Duration> JDBC_TIMEOUT = new ConfigOption<>(JDBC_NS,
         "jdbc-timeout", "JDBC connection timeout in seconds for backends that use JDBC",
-        ConfigOption.Type.MASKABLE, Duration.ofSeconds(30L));
+        ConfigOption.Type.LOCAL, Duration.ofSeconds(60L));
     public static final ConfigOption<Integer> JDBC_POOL_SIZE = new ConfigOption<>(JDBC_NS,
         "jdbc-pool-size", "JDBC connection pool size for backends that use JDBC",
-        ConfigOption.Type.MASKABLE, 10, ConfigOption.positiveInt());
+        ConfigOption.Type.LOCAL, 10, ConfigOption.positiveInt());
     // TODO - this should not be stored in the open, is there some way to encrypt this or fetch
     // it securely?
     public static final ConfigOption<String> JDBC_PASSWORD = new ConfigOption<>(JDBC_NS,

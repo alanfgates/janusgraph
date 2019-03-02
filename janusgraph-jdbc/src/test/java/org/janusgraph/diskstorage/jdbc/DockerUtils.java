@@ -23,6 +23,12 @@ import org.slf4j.LoggerFactory;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Duration;
+import java.util.Properties;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
@@ -31,30 +37,63 @@ public class DockerUtils {
     private static final String IMAGE_NAME = "postgres:9.3";
     private static final String BASE_CONTAINER_NAME = "janus-postgres-test-";
     private static final String PORT_MAPPING = "5432:5432";
+    private static final String PSQL_URL = "jdbc:postgresql://localhost:5432/";
     private static final String PSQL_USER = "dynamotest";
+    private static final String PSQL_DB = "dynamotestdb";
     private static final String PSQL_USER_PWD = "5Up3r53cr3t";
+    private static final String PSQL_ROOT_USER = "postgres";
+    private static final String PSQL_ROOT_PWD = "its-a-secret";
+    private static final long MAX_STARTUP_WAIT = 300000;
 
     static ModifiableConfiguration getConfig() {
         ModifiableConfiguration config = GraphDatabaseConfiguration.buildGraphConfiguration();
         config.set(GraphDatabaseConfiguration.STORAGE_BACKEND, "dynamo");
-        config.set(ConfigConstants.JDBC_URL, "jdbc:postgresql://localhost:5432/" + PSQL_USER);
+        config.set(ConfigConstants.JDBC_URL, PSQL_URL + PSQL_DB);
         // This sets it to use a local docker instance of Dynamo rather than Amazon's actual service
         config.set(ConfigConstants.JDBC_USER, PSQL_USER);
         // Set the number of concurrent connections high because the concurrency tests run 64 simultaneous threads
         config.set(ConfigConstants.JDBC_PASSWORD, PSQL_USER_PWD);
+        config.set(ConfigConstants.JDBC_TIMEOUT, Duration.ofMinutes(5));
         return config;
     }
 
-    static String startDocker() throws IOException, InterruptedException {
+    static String startDocker() throws IOException, InterruptedException, SQLException {
         String name = genContainerName();
         LOG.info("Starting Postgres in a container with name " + name);
-        if (runCmdAndPrintStreams(new String[] {"docker", "run", "--name", name, "-p", PORT_MAPPING, "-d",
-            IMAGE_NAME}, 300) != 0) {
+        if (runCmdAndPrintStreams(new String[] {"docker", "run", "--name", name, "-p", PORT_MAPPING,
+            "-e", "POSTGRES_PASSWORD=" + PSQL_ROOT_PWD, "-d", IMAGE_NAME}, 300) != 0) {
             throw new IOException("Failed to run docker image");
         }
-        // Connect to the postgres instance and create a test user
-        //PGSimpleDataSource ds = new PGSimpleDataSource
 
+        // Wait for the database to be up and running
+        long startTime = System.currentTimeMillis();
+        ProcessResults pr;
+        do {
+            LOG.debug("Waiting for database to start...");
+            Thread.sleep(5000);
+            pr = runCmd(new String[] {"docker", "logs", name}, 5);
+            if (pr.rc != 0) throw new RuntimeException("Failed to get docker logs");
+        } while (startTime + MAX_STARTUP_WAIT >= System.currentTimeMillis() && !pr.stdout.contains("database system is ready to accept connections"));
+        if (startTime + MAX_STARTUP_WAIT < System.currentTimeMillis()) {
+            throw new RuntimeException("Container failed to be ready in " + MAX_STARTUP_WAIT/1000 +
+                " seconds");
+        }
+
+        // Connect to the postgres instance and create a test user
+        LOG.debug("Database started, adding test user");
+        Properties props = new Properties();
+        props.setProperty("user", PSQL_ROOT_USER);
+        props.setProperty("password", PSQL_ROOT_PWD);
+        try (Connection conn = DriverManager.getConnection(PSQL_URL, props)) {
+            try (Statement stmt = conn.createStatement()) {
+                String sql = "create user " + PSQL_USER + " password '" + PSQL_USER_PWD + "'";
+                LOG.debug("Going to execute " + sql);
+                stmt.execute(sql);
+                sql = "create database " + PSQL_DB + " with owner " + PSQL_USER;
+                LOG.debug("Going to execute " + sql);
+                stmt.execute(sql);
+            }
+        }
         return name;
     }
 

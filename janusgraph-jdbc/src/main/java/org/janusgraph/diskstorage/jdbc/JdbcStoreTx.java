@@ -44,6 +44,7 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
         this.txId = txId;
         txs.put(txId, this);
         closed = false;
+        log.debug("TXN-OP Opening transaction " + txId);
     }
 
     @Override
@@ -91,9 +92,6 @@ public class JdbcStoreTx extends AbstractStoreTransaction implements Closeable {
 
     Connection getJdbcConn() {
         if (closed) throw new IllegalStateException("Attempt to get connection on closed transaction");
-        if (log.isDebugEnabled()) {
-            log.debug("TXN-OP " + Thread.currentThread().getName() + " getting jdbc connection for transaction " + txId);
-        }
         return jdbcConn;
     }
 }
