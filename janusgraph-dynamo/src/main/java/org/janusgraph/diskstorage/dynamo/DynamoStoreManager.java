@@ -32,6 +32,7 @@ import org.janusgraph.diskstorage.keycolumnvalue.KeyRange;
 import org.janusgraph.diskstorage.keycolumnvalue.StandardStoreFeatures;
 import org.janusgraph.diskstorage.keycolumnvalue.StoreFeatures;
 import org.janusgraph.diskstorage.keycolumnvalue.StoreTransaction;
+import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -195,6 +196,8 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
 
     @Override
     public StoreFeatures getFeatures() {
+        Configuration c = GraphDatabaseConfiguration.buildGraphConfiguration();
+
         return new StandardStoreFeatures.Builder()
             .unorderedScan(true)
             .orderedScan(true)
@@ -202,6 +205,7 @@ public class DynamoStoreManager extends AbstractStoreManager implements KeyColum
             .distributed(true)
             .persists(true)
             .supportsInterruption(true)
+            .keyConsistent(c)
             .build();
     }
 
