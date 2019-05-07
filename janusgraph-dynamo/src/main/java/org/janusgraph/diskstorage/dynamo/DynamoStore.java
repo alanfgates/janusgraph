@@ -18,6 +18,7 @@ import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.ItemCollection;
 import com.amazonaws.services.dynamodbv2.document.QueryOutcome;
 import com.amazonaws.services.dynamodbv2.document.RangeKeyCondition;
+import com.amazonaws.services.dynamodbv2.document.Table;
 import com.amazonaws.services.dynamodbv2.document.spec.QuerySpec;
 import com.amazonaws.services.dynamodbv2.document.spec.UpdateItemSpec;
 import org.janusgraph.diskstorage.BackendException;
@@ -63,8 +64,10 @@ public class DynamoStore implements KeyColumnValueStore {
 
     private final DynamoStoreManager manager;
     private final String storeName;
+    // Don't access this directly, call getTable
+    private DynamoStoreManager.DynamoTable table;
 
-    public DynamoStore(DynamoStoreManager mgr, String storeName) {
+    DynamoStore(DynamoStoreManager mgr, String storeName) {
         manager = mgr;
         this.storeName = storeName;
     }
@@ -73,8 +76,8 @@ public class DynamoStore implements KeyColumnValueStore {
     public EntryList getSlice(KeySliceQuery query, StoreTransaction txh) throws BackendException {
         // Dynamo doesn't support conditions on attribute names in the item.  So this fetches back the entire
         // item and then returns only columns in the slice.
-        try (DynamoTable table = getTable()) {
-            Item item = table.get().getItem(PARTITION_KEY, storeName, SORT_KEY, query.getKey().as(bytesToStrFactory));
+        try {
+            Item item = getTable().getItem(PARTITION_KEY, storeName, SORT_KEY, query.getKey().as(bytesToStrFactory));
             if (item == null) return StaticArrayEntryList.of(Collections.emptyList());
             SortedMap<String, Object> sortedItem = sortFilterLimit(query, item);
             return StaticArrayEntryList.ofBytes(sortedItem.entrySet(), itemEntryGetter);
@@ -86,14 +89,14 @@ public class DynamoStore implements KeyColumnValueStore {
 
     @Override
     public Map<StaticBuffer, EntryList> getSlice(List<StaticBuffer> keys, SliceQuery query, StoreTransaction txh) {
-        // TODO could implement this as range scan, but if teh keys are few and far apart we'll end up reading
+        // TODO could implement this as range scan, but if the keys are few and far apart we'll end up reading
         // a lot of values for little benefit
         throw new UnsupportedOperationException();
     }
 
     @Override
     public void mutate(StaticBuffer key, List<Entry> additions, List<StaticBuffer> deletions, StoreTransaction txh) throws BackendException {
-        try (DynamoTable table = getTable()) {
+        try {
             List<AttributeUpdate> updates = new ArrayList<>();
             for (StaticBuffer colToDrop : deletions) {
                 updates.add(new AttributeUpdate(colToDrop.as(bytesToStrFactory)).delete());
@@ -114,7 +117,7 @@ public class DynamoStore implements KeyColumnValueStore {
                 .withPrimaryKey(PARTITION_KEY, storeName, SORT_KEY, key.as(bytesToStrFactory))
                 .withAttributeUpdate(updates);
             if (LOG.isDebugEnabled()) LOG.debug("Doing update on key " + key.as(bytesToStrFactory));
-            table.get().updateItem(update);
+            getTable().updateItem(update);
         } catch (Exception e) {
             LOG.error("Failed to run update for key " + key.as(bytesToStrFactory), e);
             throw new TemporaryBackendException("Failed to run update", e);
@@ -145,11 +148,32 @@ public class DynamoStore implements KeyColumnValueStore {
 
     @Override
     public void close() {
+        // This does not guard against a user closing this while other threads are executing operations.  I'll leave
+        // that to the user.  It does guard against an NPE caused by multiple closures.
+        if (table != null) {
+            synchronized (this) {
+                if (table != null) {
+                    table.close();
+                    table = null;
+                }
+            }
+        }
+    }
+
+    private Table getTable() throws TemporaryBackendException {
+        if (table == null) {
+            synchronized (this) {
+                if (table == null) {
+                    table = manager.getTable();
+                }
+            }
+        }
+        return table.get();
     }
 
     private KeyIterator doScan(SliceQuery sliceQuery, StaticBuffer keyStart, StaticBuffer keyEnd) throws BackendException {
         String end = keyEnd == null ? null : keyEnd.as(bytesToStrMinusOneFactory);
-        try (DynamoTable table = getTable()) {
+        try {
             QuerySpec querySpec = new QuerySpec()
                 .withHashKey(PARTITION_KEY, storeName);
             LOG.debug("Starting query with partition key " + storeName);
@@ -162,7 +186,7 @@ public class DynamoStore implements KeyColumnValueStore {
                     LOG.debug("Adding range key condition between " + keyStart.as(bytesToStrFactory) + " and " + end);
                 }
             }
-            ItemCollection<QueryOutcome> results = table.get().query(querySpec);
+            ItemCollection<QueryOutcome> results = getTable().query(querySpec);
             final Iterator<Item> resultsIter = results.iterator();
 
             return new KeyIterator() {
@@ -254,10 +278,6 @@ public class DynamoStore implements KeyColumnValueStore {
             LOG.trace("After applying limit map has " + sortedItem.size() + " values");
         }
         return sortedItem;
-    }
-
-    private DynamoTable getTable() throws BackendException {
-        return new DynamoTable(manager.getPool(), manager.getStorageConfig());
     }
 
     private final StaticArrayEntry.GetColVal<Map.Entry<String, Object>, byte[]> itemEntryGetter = new StaticArrayEntry.GetColVal<Map.Entry<String, Object>, byte[]>() {

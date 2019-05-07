@@ -43,11 +43,11 @@ public class DynamoTableTest {
     public void existenceCreationAndDrop() throws BackendException {
         ModifiableConfiguration conf = TestUtils.getConfig();
         conf.set(DYNAMO_TABLE_NAME, "dtt");
-        ConnectionPool pool = new ConnectionPool(conf);
-        Assert.assertFalse(DynamoTable.exists(pool, conf));
-        DynamoTable table = new DynamoTable(pool, conf);
-        Assert.assertTrue(DynamoTable.exists(pool, conf));
-        DynamoTable.drop(pool, conf);
-        Assert.assertFalse(DynamoTable.exists(pool, conf));
+        DynamoStoreManager mgr = new DynamoStoreManager(conf);
+        Assert.assertFalse(mgr.tableExists());
+        DynamoStoreManager.DynamoTable table = mgr.getTable();
+        Assert.assertTrue(mgr.tableExists());
+        mgr.clearStorage();
+        Assert.assertFalse(mgr.tableExists());
     }
 }
